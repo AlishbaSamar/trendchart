@@ -4,3 +4,6 @@ gatherUsageStats = false   # don't send usage statistics to Streamlit
 
 [server]
 maxUploadSize = 5          # MB, same limit as data_loader.py
+
+[theme]
+base = "light"             # always light, even if the viewer's computer is in dark mode
