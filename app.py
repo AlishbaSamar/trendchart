@@ -507,8 +507,10 @@ with dashboard_body:
         with st.container(horizontal=True):
             st.download_button("⬇ Download this chart", png, f"{chart_file}.png", "image/png",
                                type="primary", on_click="ignore", help="PNG, 2727 × 1087 pixels")
+            every_month = sorted({p for h in histories.values() for p in h.index})
             st.download_button(f"⬇ All {len(zip_jobs)} charts (ZIP)", all_charts_zip,
-                               f"charts_{file_end}.zip", "application/zip", on_click="ignore")
+                               f"charts_{every_month[0]}_to_{every_month[-1]}.zip", "application/zip",
+                               on_click="ignore")
             st.download_button("SVG", lambda: render_chart(history, svg_settings), f"{chart_file}.svg",
                                "image/svg+xml", on_click="ignore", type="tertiary",
                                help="Vector file for designers")
