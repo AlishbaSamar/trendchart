@@ -336,25 +336,33 @@ default_name = f"{all_periods[0]}_to_{all_periods[-1]}"
 file_name = safe_file_name(st.text_input("File name ending", default_name))
 
 
+# The ZIP and SVG are only built when their button is clicked. That happens in a
+# separate background thread which CAN'T read st.session_state, so everything
+# they need is worked out now and handed over as plain values.
+zip_jobs = [
+    (f"{safe_file_name(m)}_{file_name}.png", h, settings_for(m))
+    for m, h in histories.items()
+    if any(n in h.columns for n in visible)
+]
+svg_settings = settings_for(metric, "svg")
+
+
 def all_charts_zip():
     """Runs only when the ZIP button is clicked: every chart as a PNG in one file."""
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-        for chart_metric, chart_history in histories.items():
-            if not any(n in chart_history.columns for n in visible):
-                continue
+        for zip_name, chart_history, chart_settings in zip_jobs:
             try:
-                image = make_chart(chart_history, settings_for(chart_metric))
+                archive.writestr(zip_name, render_chart(chart_history, chart_settings))
             except ValueError:
                 continue  # e.g. nothing to draw in this chart
-            archive.writestr(f"{safe_file_name(chart_metric)}_{file_name}.png", image)
     return buffer.getvalue()
 
 
 chart_file = f"{safe_file_name(metric)}_{file_name}"
 d1, d2, d3, d4 = st.columns(4)
 d1.download_button(f"PNG: {metric}", png, f"{chart_file}.png", "image/png", type="primary")
-d2.download_button(f"SVG: {metric}", lambda: make_chart(history, settings_for(metric, "svg")),
+d2.download_button(f"SVG: {metric}", lambda: render_chart(history, svg_settings),
                    f"{chart_file}.svg", "image/svg+xml")
 d3.download_button(f"All {len(histories)} charts (ZIP of PNGs)", all_charts_zip,
                    f"charts_{file_name}.zip", "application/zip")
