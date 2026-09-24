@@ -452,7 +452,7 @@ with dashboard_body:
         if mine:
             k1.metric(f"{site} · {period_label(last)}", fmt(mine["value"]),
                       fmt_change(mine["change"], mine["change_pct"]), border=True, height=TILE,
-                      chart_data=mine["trend"], chart_type="area",
+                      chart_data=mine["trend"] if len(mine["trend"]) > 1 else None, chart_type="area",
                       help=f"{site}'s {metric}, {compare}")
             move = mine["rank_move"]
             k2.metric("Rank", f"#{mine['rank']} of {mine['of']}",
@@ -475,22 +475,32 @@ with dashboard_body:
             k4.metric("🚀 Biggest move", "–", border=True, height=TILE, help="Needs two months of data")
 
         # --- The chart ----------------------------------------------------------
-        try:
-            png = make_chart(history, settings_for(metric))
-        except ValueError as e:  # e.g. an axis step that is far too small
-            st.error(str(e))
-            st.stop()
-        with st.container(border=True):
-            st.image(png, width="stretch")
-            if len(history) < 2:
-                st.caption("Only one month so far - the lines appear once the next month is added.")
+        # A trend line needs at least two months. With one month every point sits
+        # in a single column, which only confuses - so explain instead.
+        has_trend = len(history) >= 2
+        png = None
+        if has_trend:
+            try:
+                png = make_chart(history, settings_for(metric))
+            except ValueError as e:  # e.g. an axis step that is far too small
+                st.error(str(e))
+                st.stop()
+            with st.container(border=True):
+                st.image(png, width="stretch")
+        else:
+            with st.container(border=True):
+                st.markdown(f"#### 📈 The {metric} chart needs at least 2 months")
+                st.markdown(f"Right now there is only **{period_label(last)}**, so there's no line to draw yet. "
+                            "The numbers for this month are in the table below.")
+                st.markdown("**To see the trend:** open last month's data file in the sidebar *first*, "
+                            "then add this month in ➕ Add month.")
 
         # --- Downloads ----------------------------------------------------------
         # The ZIP and SVG are only built when clicked, in a background thread that
         # CAN'T read st.session_state - so everything they need is prepared now.
         file_end = f"{history.index[0]}_to_{history.index[-1]}"
         zip_jobs = [(f"{safe_file_name(m)}_{file_end}.png", h, settings_for(m))
-                    for m, h in histories.items() if any(n in h.columns for n in visible)]
+                    for m, h in histories.items() if len(h) >= 2 and any(n in h.columns for n in visible)]
         svg_settings = settings_for(metric, "svg")
 
         def all_charts_zip():
@@ -505,15 +515,18 @@ with dashboard_body:
 
         chart_file = f"{safe_file_name(metric)}_{file_end}"
         with st.container(horizontal=True):
-            st.download_button("⬇ Download this chart", png, f"{chart_file}.png", "image/png",
-                               type="primary", on_click="ignore", help="PNG, 2727 × 1087 pixels")
-            every_month = sorted({p for h in histories.values() for p in h.index})
-            st.download_button(f"⬇ All {len(zip_jobs)} charts (ZIP)", all_charts_zip,
-                               f"charts_{every_month[0]}_to_{every_month[-1]}.zip", "application/zip",
-                               on_click="ignore")
-            st.download_button("SVG", lambda: render_chart(history, svg_settings), f"{chart_file}.svg",
-                               "image/svg+xml", on_click="ignore", type="tertiary",
-                               help="Vector file for designers")
+            if has_trend:
+                st.download_button("⬇ Download this chart", png, f"{chart_file}.png", "image/png",
+                                   type="primary", on_click="ignore", help="PNG, 2727 × 1087 pixels")
+            if zip_jobs:
+                every_month = sorted({p for _, h, _ in zip_jobs for p in h.index})
+                st.download_button(f"⬇ All {len(zip_jobs)} charts (ZIP)", all_charts_zip,
+                                   f"charts_{every_month[0]}_to_{every_month[-1]}.zip", "application/zip",
+                                   on_click="ignore", help="Every chart that has at least 2 months")
+            if has_trend:
+                st.download_button("SVG", lambda: render_chart(history, svg_settings), f"{chart_file}.svg",
+                                   "image/svg+xml", on_click="ignore", type="tertiary",
+                                   help="Vector file for designers")
 
         # --- Leaderboard ----------------------------------------------------------
         st.markdown(f"#### 🏅 {metric} · {period_label(last)}")
@@ -554,7 +567,7 @@ with tab_summary:
             last_here, _ = latest_months(chart_history)
             cards[i % 4].metric(
                 chart_name, fmt(info["value"]), fmt_change(info["change"], info["change_pct"]), border=True,
-                chart_data=info["trend"], chart_type="area",
+                chart_data=info["trend"] if len(info["trend"]) > 1 else None, chart_type="area",
                 help=f"Rank #{info['rank']} of {info['of']} in {period_label(last_here)}",
             )
             rows.append({"Chart": chart_name, "Month": period_label(last_here), "Value": info["value"],
