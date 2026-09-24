@@ -1,0 +1,5 @@
+# How Railway starts the app. Railway gives us the port number in $PORT.
+[deploy]
+startCommand = "streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true"
+healthcheckPath = "/_stcore/health"
+restartPolicyType = "ON_FAILURE"

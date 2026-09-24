@@ -1,0 +1,5 @@
+# Installed libraries - recreate with: pip install -r requirements.txt
+.venv/
+__pycache__/
+# Test charts written by `python chart.py`
+output/
