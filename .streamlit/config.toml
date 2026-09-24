@@ -7,3 +7,7 @@ maxUploadSize = 5          # MB, same limit as data_loader.py
 
 [theme]
 base = "light"             # always light, even if the viewer's computer is in dark mode
+primaryColor = "#2563EB"   # calm blue for buttons and selected items (red looks like an error)
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F4F6FA"
+textColor = "#1F2937"

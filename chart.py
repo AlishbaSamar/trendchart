@@ -505,6 +505,21 @@ def _add_callouts(ax, history, names, colors, to_px, value_boxes, px_per_pt):
                         if box[0] < plot[0] or box[2] > plot[2] or box[1] < plot[1] or box[3] > plot[3]:
                             continue  # would stick out of the chart
                         candidates.append((dist, anchor_x, anchor_y, box, side))
+        if not segments[name]:
+            # Only one month of data (e.g. a new competitor): anchor the box at that point.
+            # Near the chart's edge the box may sit left or right of the point instead of centred.
+            for i in np.flatnonzero(~np.isnan(values)):
+                anchor_x, anchor_y = to_px(i, values[i])
+                for shift in (0, -(box_w / 2 - 12), box_w / 2 - 12):
+                    for side in (1, -1):
+                        for dist in range(int(12 * px_per_pt), int(plot[3] - plot[1]), 14):
+                            centre_x = anchor_x + shift
+                            centre_y = anchor_y + side * (dist + box_h / 2)
+                            box = (centre_x - box_w / 2, centre_y - box_h / 2,
+                                   centre_x + box_w / 2, centre_y + box_h / 2)
+                            if box[0] < plot[0] or box[2] > plot[2] or box[1] < plot[1] or box[3] > plot[3]:
+                                continue
+                            candidates.append((dist, anchor_x, anchor_y, box, side))
         candidates.sort(key=lambda c: c[0])  # shortest leader first
 
         best = None
