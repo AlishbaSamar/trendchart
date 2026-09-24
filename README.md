@@ -23,28 +23,31 @@ Then open http://localhost:8501
 
 ## Monthly workflow
 
-1. **Load history**: upload last month's history CSV for this chart (e.g. `fecon_top100_history.csv`).
-2. **Add a month**: upload this month's Semrush export, pick the metric (e.g. Top 100), check the month, click *Add*.
-   If the app warns that names don't match, fix the spelling with *Add or rename a competitor*.
-3. **Check the data** in the table and correct any value.
-4. **Chart**: choose competitors to show, our site, axis and colors. Then download:
-   - the PNG / SVG for the report
-   - the **updated history CSV**. Keep it, because you'll upload it next month.
+All charts (DA, Worldwide Traffic, US Traffic, Top 3 / Top 10 / Top 100, Top 3 Volume)
+live in **one history CSV**, one line per chart and month.
 
-Keep one history CSV per chart (traffic, Top 100, Top 3 volume...) in a shared folder.
+1. **Load history**: upload last month's history CSV. (First time: skip this step.)
+2. **Add a month**: upload this month's Semrush export, check the month, click *Add to all charts*.
+   If the app warns that names don't match, fix the spelling with *Add or rename a competitor*.
+3. **Choose a chart** and check its numbers in the table (you can correct values there).
+4. **Chart**: choose competitors to show, our site, colors, and a y-axis per chart if needed. Then download:
+   - one chart as PNG / SVG, or **all charts as a ZIP**
+   - the **updated history CSV**. Keep it, because you'll upload it next month.
 
 ## History CSV format
 
 ```
-period,Fecon,Virnig,FAE Group
-2026-01,3369,5710,3089
-2026-02,3534,5758,3234
+metric,period,Fecon,Virnig,FAE Group
+US Traffic,2026-01,16487,11431,8648
+US Traffic,2026-02,15747,15112,10060
+Top 100,2026-01,3369,5710,3089
 ```
 
+- `metric` = chart name (Semrush's "Domain Overview" is called **DA**)
 - `period` can be `2026-01`, `Jan 26` or `January 2026`
 - numbers can be `3,369`, `3.4K` or `1.2M`. **Exact numbers give exact labels.**
 - an empty cell = no data that month (a gap in the line)
-- a long format `period,series,value` is also accepted
+- older files without a `metric` column still work (one chart, named after the file)
 
 ## Files
 
@@ -53,7 +56,7 @@ period,Fecon,Virnig,FAE Group
 | `app.py` | The web page (Streamlit) |
 | `chart.py` | `render_chart()`: draws the chart, prevents label overlaps. Colors in `DEFAULT_COLORS` |
 | `data_loader.py` | Reads and checks CSV files, parses `K`/`M`/commas |
-| `sample_data/` | Test data (Top 100 and traffic histories, one Semrush export) |
+| `sample_data/` | Test data: `fecon_all_charts_history.csv` (US Traffic + Top 100), one Semrush export |
 | `fonts/` | Liberation Sans, bundled so charts look the same on every PC |
 | `reference/` | Original PRD, Manus's chart and code (for reference only) |
 

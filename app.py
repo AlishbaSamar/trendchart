@@ -8,15 +8,21 @@ How Streamlit works (the one thing to know):
   file again from top to bottom. Values that must survive between runs are
   kept in `st.session_state` (a dictionary that Streamlit remembers).
 
+The team makes one chart per metric (DA, Worldwide Traffic, US Traffic,
+Top 3 Volume, ...). All metrics live in ONE history file, and one Semrush
+upload adds the new month to all of them.
+
 Page layout:
-  1. Load history     - upload a history CSV (or try a sample)
-  2. Add a month      - upload a Semrush export, pick the metric and month
-  3. Check the data   - editable table
-  4. Chart            - show/hide competitors, options, preview, downloads
+  1. Load history     - upload the history CSV (or try a sample)
+  2. Add a month      - upload this month's Semrush export
+  3. Choose a chart   - pick the metric and check / edit its data
+  4. Chart            - options, preview, downloads (one chart or all as ZIP)
 """
 
 import io
 import re
+import zipfile
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -24,16 +30,16 @@ import streamlit as st
 from chart import ChartSettings, auto_axis, pick_colors, render_chart
 from data_loader import (
     DataError,
-    add_month,
-    history_to_csv,
+    add_month_all,
+    histories_to_csv,
+    load_histories,
     load_history,
     load_semrush_month,
     period_label,
 )
 
 SAMPLES = {
-    "Fecon - Top 100 keywords": "sample_data/fecon_top100_history.csv",
-    "Fecon - Monthly traffic": "sample_data/fecon_traffic_history.csv",
+    "Fecon - all charts (US Traffic + Top 100)": "sample_data/fecon_all_charts_history.csv",
 }
 MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
 
@@ -44,20 +50,28 @@ st.title("Competitor Trend Chart")
 # ---------------------------------------------------------------------------
 # Remembered state
 # ---------------------------------------------------------------------------
-# "history"        : the table the editor starts from
-# "editor_version" : changed whenever "history" is replaced, so the table
-#                    editor starts fresh instead of keeping old edits
-# "loaded_file"    : which uploaded file we already read (so we don't re-read it every run)
+# histories   : {metric: table} as loaded / after "Add month"
+# edits       : {metric: table} typed changes from the data table, kept per chart
+# version     : changes whenever `histories` is replaced -> the table editor starts fresh
+# axis        : {metric: (top, step)} for charts with a manual y-axis
+# loaded_file : the uploaded history file we already read
 
-if "history" not in st.session_state:
-    st.session_state.history = None
-    st.session_state.editor_version = 0
-    st.session_state.loaded_file = None
+defaults = {"histories": {}, "edits": {}, "version": 0, "axis": {},
+            "loaded_file": None, "editor_key": None, "editor_base": None}
+for key, value in defaults.items():
+    st.session_state.setdefault(key, value)
+state = st.session_state
 
 
-def set_history(new_history):
-    st.session_state.history = new_history
-    st.session_state.editor_version += 1
+def current_histories():
+    """Loaded data with any typed changes applied."""
+    return {**state.histories, **state.edits}
+
+
+def set_histories(new_histories):
+    state.histories = new_histories
+    state.edits = {}
+    state.version += 1
 
 
 def show_errors(error):
@@ -72,12 +86,25 @@ def guess_month_from_filename(filename):
     return None
 
 
-def next_month(history):
-    """The month after the last one in the history."""
-    if history is None or history.empty:
+def next_month(histories):
+    """The month after the latest month in any chart."""
+    periods = [p for h in histories.values() for p in h.index]
+    if not periods:
         return pd.Timestamp.today().strftime("%b %Y")
-    last = pd.to_datetime(history.index[-1], format="%Y-%m")
+    last = pd.to_datetime(max(periods), format="%Y-%m")
     return (last + pd.DateOffset(months=1)).strftime("%b %Y")
+
+
+def all_competitors(histories):
+    """Every competitor name in any chart, in first-seen order."""
+    names = []
+    for history in histories.values():
+        names += [n for n in history.columns if n not in names]
+    return names
+
+
+def safe_file_name(text):
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("_") or "chart"
 
 
 # ---------------------------------------------------------------------------
@@ -85,9 +112,9 @@ def next_month(history):
 # ---------------------------------------------------------------------------
 
 st.header("1. Load history")
-st.caption("A history CSV has one row per month and one column per competitor, "
-           "e.g. `period,Fecon,Virnig` then `2026-01,3369,5710`. "
-           "Download the updated file at the bottom of the page and upload it again next month.")
+st.caption("One CSV holds every chart: columns `metric, period, Fecon, Virnig, ...` "
+           "(e.g. `US Traffic, 2026-01, 16487, 11431`). Download the updated file at the bottom "
+           "and upload it again next month. First time? Skip this and upload a Semrush export below.")
 
 col_upload, col_sample = st.columns([2, 1])
 with col_upload:
@@ -95,14 +122,15 @@ with col_upload:
 with col_sample:
     sample = st.selectbox("...or try a sample", ["(none)"] + list(SAMPLES))
     if st.button("Load sample", disabled=sample == "(none)"):
-        set_history(load_history(SAMPLES[sample]))
-        st.session_state.loaded_file = None
+        set_histories(load_histories(SAMPLES[sample]))
+        state.loaded_file = None
 
 # Read a newly uploaded history file once.
-if history_file is not None and st.session_state.loaded_file != history_file.file_id:
-    st.session_state.loaded_file = history_file.file_id
+if history_file is not None and state.loaded_file != history_file.file_id:
+    state.loaded_file = history_file.file_id
     try:
-        set_history(load_history(history_file))
+        # An old single-chart file (no metric column) is named after the file.
+        set_histories(load_histories(history_file, default_metric=Path(history_file.name).stem))
     except DataError as e:
         show_errors(e)
 
@@ -111,7 +139,7 @@ if history_file is not None and st.session_state.loaded_file != history_file.fil
 # 2. Add a month from a Semrush export
 # ---------------------------------------------------------------------------
 
-st.header("2. Add a month (optional)")
+st.header("2. Add a month")
 semrush_file = st.file_uploader("Semrush competitor export for ONE month", type="csv", key="semrush_upload")
 
 if semrush_file is not None:
@@ -122,140 +150,114 @@ if semrush_file is not None:
         month_data = None
 
     if month_data is not None:
-        metrics = list(month_data.columns)
-        c1, c2, c3 = st.columns(3)
-        metric = c1.selectbox("Metric to chart", metrics,
-                              index=metrics.index("Top 100") if "Top 100" in metrics else 0)
-        month_text = c2.text_input("Month", guess_month_from_filename(semrush_file.name)
-                                   or next_month(st.session_state.history))
-        replace = c3.checkbox("Replace this month if it already exists")
+        c1, c2 = st.columns(2)
+        month_text = c1.text_input("Month", guess_month_from_filename(semrush_file.name)
+                                   or next_month(state.histories))
+        replace = c2.checkbox("Replace this month if it already exists")
 
-        st.dataframe(month_data[[metric]], width="content")
+        st.caption(f"This file has {len(month_data.columns)} metrics - each one becomes a chart:")
+        st.dataframe(month_data, width="stretch")
 
         # Warn about names that don't match the history - usually a spelling difference
         # like "Diamond Mowers" vs "Diamond Mower", which would create two separate lines.
-        history = st.session_state.history
-        if history is not None:
-            new_names = [n for n in month_data.index if n not in history.columns]
-            missing = [n for n in history.columns if n not in month_data.index]
+        known = all_competitors(state.histories)
+        if known:
+            new_names = [n for n in month_data.index if n not in known]
+            missing = [n for n in known if n not in month_data.index]
             if new_names:
                 st.warning("Not in the history yet (a new line will be added): " + ", ".join(new_names))
             if missing:
                 st.info("In the history but not in this file (this month will be empty): " + ", ".join(missing))
 
-        if st.button(f"Add '{metric}' as {month_text}", type="primary"):
+        if st.button(f"Add {month_text} to all {len(month_data.columns)} charts", type="primary"):
             try:
-                base = st.session_state.get("edited_history", history)
-                set_history(add_month(base, month_text, month_data[metric], replace=replace))
+                set_histories(add_month_all(current_histories(), month_text, month_data, replace=replace))
                 st.success(f"Added {month_text}.")
-            except (DataError, ValueError) as e:
-                show_errors(e if isinstance(e, DataError) else DataError([str(e)]))
+            except DataError as e:
+                show_errors(e)
+            except ValueError as e:  # month text not understood
+                show_errors(DataError([str(e)]))
 
 
 # ---------------------------------------------------------------------------
-# 3. Check / edit the data
+# 3. Choose a chart and check its data
 # ---------------------------------------------------------------------------
 
-if st.session_state.history is None:
-    st.info("Load a history CSV or a sample to start.")
+if not state.histories:
+    st.info("Load a history CSV, a sample, or a Semrush export to start.")
     st.stop()  # nothing more to show yet
 
-st.header("3. Check the data")
-st.caption("You can type in the table to correct a value. Leave a cell empty for a missing month. "
-           "Use the + at the bottom of the table to add a month.")
+st.header("3. Choose a chart")
+metric = st.selectbox("Chart", list(current_histories()), key="metric")
 
-# Show the table with "period" as a normal (editable) column.
-table = st.session_state.history.reset_index()
+st.caption("Check the numbers for this chart. Type to correct a value, leave a cell empty for a "
+           "missing month, use the + at the bottom to add a month.")
+
+# The table editor must always start from the same data while it is on screen,
+# otherwise Streamlit applies your typed changes twice. So we take a snapshot
+# when the chart changes (or new data is loaded) and keep using it.
+editor_key = f"editor_{state.version}_{metric}"
+if state.editor_key != editor_key:
+    state.editor_key = editor_key
+    state.editor_base = current_histories()[metric].reset_index()
+
 edited = st.data_editor(
-    table,
+    state.editor_base,
     num_rows="dynamic",
     hide_index=True,
     width="stretch",
-    key=f"editor_{st.session_state.editor_version}",
+    key=editor_key,
     column_config={"period": st.column_config.TextColumn("period", help="e.g. 2026-09 or Sep 26")},
 )
 
-with st.expander("Add or rename a competitor"):
-    c1, c2 = st.columns(2)
-    new_name = c1.text_input("New competitor name")
-    if c1.button("Add competitor", disabled=not new_name.strip()):
-        base = st.session_state.get("edited_history", st.session_state.history)
-        if new_name.strip() in base.columns:
-            st.warning("That competitor already exists.")
-        else:
-            set_history(base.assign(**{new_name.strip(): float("nan")}))
-            st.rerun()
-    old = c2.selectbox("Rename", list(st.session_state.history.columns))
-    renamed = c2.text_input("New name for it")
-    if c2.button("Rename", disabled=not renamed.strip()):
-        base = st.session_state.get("edited_history", st.session_state.history)
-        if renamed.strip() in base.columns:
-            st.warning("That name is already used. Rename can't merge two competitors.")
-        else:
-            set_history(base.rename(columns={old: renamed.strip()}))
-            st.rerun()
-
-# Check the edited table with the SAME rules as a CSV upload
-# (turn it into CSV text and read it back).
+# Check the edited table with the SAME rules as a CSV upload.
 try:
-    csv_text = edited.to_csv(index=False)
-    history = load_history(io.BytesIO(csv_text.encode("utf-8")), first_row=1)
-    st.session_state.edited_history = history
+    history = load_history(io.BytesIO(edited.to_csv(index=False).encode("utf-8")), first_row=1)
+    state.edits[metric] = history
 except DataError as e:
     show_errors(e)
     st.stop()
+
+with st.expander("Add or rename a competitor (applies to all charts)"):
+    c1, c2 = st.columns(2)
+    names = all_competitors(current_histories())
+    new_name = c1.text_input("New competitor name").strip()
+    if c1.button("Add competitor", disabled=not new_name):
+        if new_name in names:
+            st.warning("That competitor already exists.")
+        else:
+            set_histories({m: h.assign(**{new_name: float("nan")}) for m, h in current_histories().items()})
+            st.rerun()
+    old = c2.selectbox("Rename", names)
+    renamed = c2.text_input("New name for it").strip()
+    if c2.button("Rename", disabled=not renamed):
+        if renamed in names:
+            st.warning("That name is already used. Rename can't merge two competitors.")
+        else:
+            set_histories({m: h.rename(columns={old: renamed}) for m, h in current_histories().items()})
+            st.rerun()
 
 
 # ---------------------------------------------------------------------------
 # 4. Chart
 # ---------------------------------------------------------------------------
 
-st.header("4. Chart")
+st.header(f"4. Chart: {metric}")
+histories = current_histories()
+names = all_competitors(histories)
 
 c1, c2, c3 = st.columns([3, 1, 1])
-visible = c1.multiselect("Competitors to show", list(history.columns), default=list(history.columns),
+visible = c1.multiselect("Competitors to show (all charts)", names, default=names,
                          help="Hiding a competitor keeps its data - it's just not drawn.")
 show_values = c2.checkbox("Show values", value=True)
 name_style = c3.radio("Names", ["box", "text"], horizontal=True,
                       format_func=lambda s: "Grey box" if s == "box" else "Plain text")
 
-if not visible:
-    st.warning("Select at least one competitor.")
-    st.stop()
-
-# --- Our site -----------------------------------------------------------------
 options = ["(none)"] + visible
 highlight = st.selectbox("Our site (thicker line, drawn on top)", options,
                          index=options.index("Fecon") if "Fecon" in options else 0)
 
-# --- Y-axis -------------------------------------------------------------------
-max_value = float(history[visible].max().max())
-auto_top, auto_step = auto_axis(max_value)
-
-with st.expander(f"Y-axis (automatic: 0 to {auto_top:,.0f} in steps of {auto_step:,.0f})"):
-    manual = st.toggle("Set the axis myself")
-    y_max = y_step = None
-    if manual:
-        # Start from the automatic values the first time the boxes appear.
-        st.session_state.setdefault("y_max_input", float(auto_top))
-        st.session_state.setdefault("y_step_input", float(auto_step))
-        a1, a2 = st.columns(2)
-        y_max = a1.number_input("Top of axis", min_value=1.0, step=float(auto_step),
-                                format="%.0f", key="y_max_input")
-        y_step = a2.number_input("Step (e.g. 2000 for 2K)", min_value=1.0,
-                                 step=float(auto_step), format="%.0f", key="y_step_input")
-
-        if max_value > y_max:
-            def expand():
-                # Round up to the next whole step above the highest value.
-                st.session_state.y_max_input = float(-(-max_value // y_step) * y_step)
-
-            st.warning(f"The highest value ({max_value:,.0f}) is above the top of the axis "
-                       f"({y_max:,.0f}), so part of the chart will be cut off.")
-            st.button("Expand axis to fit", on_click=expand)
-
-# --- Colors -------------------------------------------------------------------
-default_colors = pick_colors(list(history.columns))
+default_colors = pick_colors(names)
 with st.expander("Colors"):
     st.caption("Known competitors have fixed colors (Fecon is always red). Changes here last until "
                "you close the page - ask to add a color to DEFAULT_COLORS in chart.py to make it permanent.")
@@ -264,15 +266,53 @@ with st.expander("Colors"):
     for i, name in enumerate(visible):
         colors[name] = picker_columns[i % 4].color_picker(name, default_colors[name], key=f"color_{name}")
 
-settings = ChartSettings(
-    hidden=[n for n in history.columns if n not in visible],
-    colors=colors,
-    show_values=show_values,
-    name_style=name_style,
-    highlight=None if highlight == "(none)" else highlight,
-    y_max=y_max,
-    y_step=y_step,
-)
+# --- Y-axis for THIS chart (each chart has its own scale) ---------------------
+shown_here = [n for n in visible if n in history.columns and history[n].notna().any()]
+if not shown_here:
+    st.warning("None of the selected competitors has data in this chart.")
+    st.stop()
+max_value = float(history[shown_here].max().max())
+auto_top, auto_step = auto_axis(max_value)
+
+with st.expander(f"Y-axis for {metric} (automatic: 0 to {auto_top:,.0f} in steps of {auto_step:,.0f})"):
+    manual = st.toggle("Set the axis myself", value=metric in state.axis, key=f"manual_{metric}")
+    if manual:
+        # Start from the saved or automatic values when the boxes appear.
+        saved_top, saved_step = state.axis.get(metric, (auto_top, auto_step))
+        st.session_state.setdefault(f"ymax_{metric}", float(saved_top))
+        st.session_state.setdefault(f"ystep_{metric}", float(saved_step))
+        a1, a2 = st.columns(2)
+        y_max = a1.number_input("Top of axis", min_value=1.0, step=float(auto_step),
+                                format="%g", key=f"ymax_{metric}")
+        y_step = a2.number_input("Step (e.g. 2000 for 2K)", min_value=0.1,
+                                 step=float(auto_step), format="%g", key=f"ystep_{metric}")
+        state.axis[metric] = (y_max, y_step)
+
+        if max_value > y_max:
+            def expand():
+                # Round up to the next whole step above the highest value.
+                st.session_state[f"ymax_{metric}"] = float(-(-max_value // y_step) * y_step)
+
+            st.warning(f"The highest value ({max_value:,.0f}) is above the top of the axis "
+                       f"({y_max:,.0f}), so part of the chart will be cut off.")
+            st.button("Expand axis to fit", on_click=expand)
+    else:
+        state.axis.pop(metric, None)
+
+
+def settings_for(chart_metric, file_format="png"):
+    """The same options for every chart; only the y-axis is per chart."""
+    y_max, y_step = state.axis.get(chart_metric, (None, None))
+    return ChartSettings(
+        hidden=[n for n in names if n not in visible],
+        colors=colors,
+        show_values=show_values,
+        name_style=name_style,
+        highlight=None if highlight == "(none)" else highlight,
+        y_max=y_max,
+        y_step=y_step,
+        file_format=file_format,
+    )
 
 
 @st.cache_data(show_spinner="Drawing chart...")
@@ -282,23 +322,46 @@ def make_chart(history, settings):
 
 
 try:
-    png = make_chart(history, settings)
+    png = make_chart(history, settings_for(metric))
 except ValueError as e:  # e.g. an axis step that is far too small
     st.error(str(e))
     st.stop()
 st.image(png, width="stretch")
+if len(history) < 2:
+    st.info("This chart has only one month so far - the lines appear once a second month is added.")
 
 # --- Downloads -------------------------------------------------------------
-default_name = f"chart_{history.index[0]}_to_{history.index[-1]}"
-file_name = st.text_input("File name", default_name)
+all_periods = sorted({p for h in histories.values() for p in h.index})
+default_name = f"{all_periods[0]}_to_{all_periods[-1]}"
+file_name = safe_file_name(st.text_input("File name ending", default_name))
 
-svg_settings = ChartSettings(**{**settings.__dict__, "file_format": "svg"})
-d1, d2, d3 = st.columns(3)
-d1.download_button("Download PNG (2727 x 1087)", png, f"{file_name}.png", "image/png", type="primary")
-d2.download_button("Download SVG", make_chart(history, svg_settings), f"{file_name}.svg", "image/svg+xml")
-d3.download_button("Download updated history CSV", history_to_csv(history),
-                   f"{file_name}_history.csv", "text/csv",
+
+def all_charts_zip():
+    """Runs only when the ZIP button is clicked: every chart as a PNG in one file."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for chart_metric, chart_history in histories.items():
+            if not any(n in chart_history.columns for n in visible):
+                continue
+            try:
+                image = make_chart(chart_history, settings_for(chart_metric))
+            except ValueError:
+                continue  # e.g. nothing to draw in this chart
+            archive.writestr(f"{safe_file_name(chart_metric)}_{file_name}.png", image)
+    return buffer.getvalue()
+
+
+chart_file = f"{safe_file_name(metric)}_{file_name}"
+d1, d2, d3, d4 = st.columns(4)
+d1.download_button(f"PNG: {metric}", png, f"{chart_file}.png", "image/png", type="primary")
+d2.download_button(f"SVG: {metric}", lambda: make_chart(history, settings_for(metric, "svg")),
+                   f"{chart_file}.svg", "image/svg+xml")
+d3.download_button(f"All {len(histories)} charts (ZIP of PNGs)", all_charts_zip,
+                   f"charts_{file_name}.zip", "application/zip")
+d4.download_button("Updated history CSV", histories_to_csv(histories),
+                   f"history_{file_name}.csv", "text/csv",
                    help="Keep this file - upload it next month and add the new month to it.")
 
-st.caption(f"{len(history)} months ({period_label(history.index[0])} - {period_label(history.index[-1])}), "
-           f"{len(visible)} of {len(history.columns)} competitors shown.")
+st.caption(f"{len(histories)} charts · this chart: {len(history)} months "
+           f"({period_label(history.index[0])} - {period_label(history.index[-1])}), "
+           f"{len(shown_here)} competitors shown.")

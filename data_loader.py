@@ -11,11 +11,21 @@ Every chart in this app is drawn from a "history" table that looks like this:
   - one COLUMN per competitor
   - an empty cell means "no data for that month" (the line will show a gap)
 
+The team makes one chart per metric (DA, traffic, Top 3 volume...), so all
+metrics are kept together in ONE file with an extra "metric" column:
+
+    metric      | period  | Fecon | Virnig | ...
+    US Traffic  | 2026-01 | 16487 | 11431  |
+    Top 100     | 2026-01 | 3369  | 5710   |
+
+In Python that becomes a dictionary: {"US Traffic": table, "Top 100": table}
+
 This file knows how to:
-  1. load_history()        read a history CSV (wide or long format)
-  2. load_semrush_month()  read one month's Semrush export and pick one metric
-  3. add_month()           add that month to the history
-  4. parse_number()        turn "20.4K", "173,120", "1.2M" into real numbers
+  1. load_histories()      read a history CSV (with or without a metric column)
+  2. load_semrush_month()  read one month's Semrush export (all metrics)
+  3. add_month_all()       add that month to every metric at once
+  4. histories_to_csv()    write everything back to one CSV
+  5. parse_number()        turn "20.4K", "173,120", "1.2M" into real numbers
 """
 
 import csv
@@ -38,6 +48,9 @@ class DataError(Exception):
 
 # Suffixes Semrush uses for rounded numbers.
 MULTIPLIERS = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}
+
+# Nicer names for some Semrush columns (used as chart names).
+METRIC_NAMES = {"Domain Overview": "DA"}
 
 # Cell values that mean "no data".
 EMPTY_VALUES = {"", "-", "n/a", "na", "none", "null"}
@@ -168,7 +181,10 @@ def load_history(source, first_row=2):
     first_row : the number shown in error messages for the first data row.
                 2 for a CSV file (row 1 is the header), 1 for the app's table.
     """
-    table = _read_table(_read_text(source))
+    return _history_from_table(_read_table(_read_text(source)), first_row)
+
+
+def _history_from_table(table, first_row):
     lower_cols = [c.lower() for c in table.columns]
 
     if "period" not in lower_cols:
@@ -259,8 +275,6 @@ def _finish(history):
     """Final clean-up shared by both layouts."""
     history = history.sort_index().astype(float)
     history.index.name = "period"
-    if len(history) < 2:
-        raise DataError(["At least 2 months are needed to draw a line."])
     return history
 
 
@@ -304,7 +318,7 @@ def load_semrush_month(source):
         raise DataError(errors)
     result = pd.DataFrame.from_dict(data, orient="index", columns=metrics).astype(float)
     result.index.name = "competitor"
-    return result
+    return result.rename(columns=METRIC_NAMES)
 
 
 def add_month(history, period, values, replace=False):
@@ -338,12 +352,83 @@ def add_month(history, period, values, replace=False):
     return updated
 
 
+def _tidy_numbers(table):
+    """Whole numbers are written without ".0" and missing values as empty cells."""
+    return table.map(lambda v: "" if pd.isna(v) else (int(v) if isinstance(v, float) and v.is_integer() else v))
+
+
 def history_to_csv(history):
-    """Turn a history table back into CSV text (for the 'download updated history' button)."""
-    out = history.copy()
-    # Whole numbers are written without ".0" so the file stays readable.
-    out = out.map(lambda v: "" if pd.isna(v) else (int(v) if float(v).is_integer() else v))
-    return out.to_csv()
+    """Turn ONE history table back into CSV text."""
+    return _tidy_numbers(history).to_csv()
+
+
+# ---------------------------------------------------------------------------
+# 6. Several metrics in one file
+# ---------------------------------------------------------------------------
+
+def load_histories(source, first_row=2, default_metric="Chart"):
+    """
+    Read a history CSV and return {metric name: history table}.
+
+    With a "metric" column, every metric gets its own table.
+    Without one (an older single-chart file), everything goes under `default_metric`.
+    """
+    table = _read_table(_read_text(source))
+    metric_col = next((c for c in table.columns if c.lower() == "metric"), None)
+    if metric_col is None:
+        return {default_metric: _history_from_table(table, first_row)}
+
+    errors = []
+    histories = {}
+    table[metric_col] = table[metric_col].str.strip()
+    for i in table.index[table[metric_col] == ""]:
+        if any(str(cell).strip() for cell in table.loc[i]):
+            errors.append(f"Row {i + first_row}, column 'metric': the chart name is empty.")
+    for metric, rows in table[table[metric_col] != ""].groupby(metric_col, sort=False):
+        try:
+            # Keep the original row numbers so error messages point at the right line.
+            history = _history_from_table(rows.drop(columns=metric_col), first_row)
+            # A competitor with no numbers at all for this metric isn't tracked in it.
+            histories[metric] = history.dropna(axis=1, how="all")
+        except DataError as e:
+            errors += [f"[{metric}] {m}" for m in e.messages]
+
+    if errors:
+        raise DataError(errors)
+    if not histories:
+        raise DataError(["The file has no data rows."])
+    return histories
+
+
+def add_month_all(histories, period, month_data, replace=False):
+    """
+    Add one Semrush month to EVERY metric at once and return the new dictionary.
+
+    month_data : table from load_semrush_month() (rows = competitors, columns = metrics)
+    """
+    period = parse_period(period)
+    if not replace:
+        clashes = [m for m in month_data.columns if m in histories and period in histories[m].index]
+        if clashes:
+            raise DataError([f"Month {period} is already in: {', '.join(clashes)}. "
+                             "Tick 'replace' to overwrite it."])
+
+    updated = dict(histories)
+    for metric in month_data.columns:
+        values = month_data[metric].dropna()
+        updated[metric] = add_month(histories.get(metric), period, values, replace=True)
+    return updated
+
+
+def histories_to_csv(histories):
+    """All metrics in one CSV: metric, period, then one column per competitor."""
+    parts = []
+    for metric, history in histories.items():
+        part = history.reset_index()
+        part.insert(0, "metric", metric)
+        parts.append(part)
+    combined = pd.concat(parts, ignore_index=True, sort=False)
+    return _tidy_numbers(combined).to_csv(index=False)
 
 
 # ---------------------------------------------------------------------------

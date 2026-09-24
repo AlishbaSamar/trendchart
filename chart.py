@@ -81,7 +81,7 @@ DEFAULT_COLORS = {
 # Colors for competitors not listed above, used in this order.
 # (No red here: red is kept for our own site, Fecon.)
 EXTRA_COLORS = [
-    "#1F77B4", "#2CA02C", "#9467BD", "#8C564B", "#E377C2",
+    "#1F77B4", "#2CA02C", "#9467BD", "#8C564B", "#6B6ECF",
     "#17BECF", "#BCBD22", "#FF7F0E", "#7F7F7F", "#393B79",
     "#637939", "#8C6D31", "#843C39", "#7B4173", "#3182BD",
 ]
@@ -162,11 +162,16 @@ def nice_step(max_value, max_ticks=11):
     return 10 * power
 
 
-def format_tick(value):
-    """ 0 -> "0K", 2000 -> "2K", 2500 -> "2.5K", 1500000 -> "1.5M", 200 -> "200" """
-    if value >= 1_000_000:
+def format_tick(value, top):
+    """
+    Axis label. The unit depends on how high the whole axis goes (`top`):
+      axis up to 22,000    : 0 -> "0K", 2000 -> "2K", 2500 -> "2.5K"
+      axis up to 2,000,000 : "0M", "0.5M", "1M"
+      axis up to 40 (DA)   : "0", "10", "20"
+    """
+    if top >= 1_000_000:
         return f"{value / 1_000_000:g}M"
-    if value >= 1_000 or value == 0:
+    if top >= 1_000:
         return f"{value / 1_000:g}K"
     return f"{value:g}"
 
@@ -275,7 +280,11 @@ def render_chart(history, settings=None):
         fig.subplots_adjust(left=0.035, right=0.985, top=0.975, bottom=0.105)
 
         # --- Make room on the right for the competitor names ----------------
-        name_gap_pt = 34  # space between the last point and its name
+        # Space between the last point and its name: wide enough that the
+        # last month's numbers (centred on the point) never touch the names.
+        last_values = [history[n].dropna().iloc[-1] for n in names]
+        widest_value = max(text_width_pt(f"{v:,.0f}", VALUE_FONT_SIZE) for v in last_values)
+        name_gap_pt = max(34, widest_value / 2 + 14) if settings.show_values else 16
         box_pad = 0.35 if settings.name_style == "box" else 0.1
         longest = max(text_width_pt(n, NAME_FONT_SIZE) for n in names)
         names_space_px = (name_gap_pt + longest + 2 * box_pad * NAME_FONT_SIZE + 8) * px_per_pt
@@ -289,7 +298,7 @@ def render_chart(history, settings=None):
         top = top_tick if settings.y_max else max(top_tick, max_value)
         ax.set_ylim(0, top + headroom)
         ax.set_yticks(ticks)
-        ax.set_yticklabels([format_tick(t) for t in ticks], color=AXIS_TEXT_COLOR, fontsize=AXIS_FONT_SIZE)
+        ax.set_yticklabels([format_tick(t, top_tick) for t in ticks], color=AXIS_TEXT_COLOR, fontsize=AXIS_FONT_SIZE)
         ax.set_xticks(x)
         ax.set_xticklabels([period_label(p) for p in periods], color=AXIS_TEXT_COLOR, fontsize=AXIS_FONT_SIZE)
 
