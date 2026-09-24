@@ -250,8 +250,8 @@ c1, c2, c3 = st.columns([3, 1, 1])
 visible = c1.multiselect("Competitors to show (all charts)", names, default=names,
                          help="Hiding a competitor keeps its data - it's just not drawn.")
 show_values = c2.checkbox("Show values", value=True)
-name_style = c3.radio("Names", ["box", "text"], horizontal=True,
-                      format_func=lambda s: "Grey box" if s == "box" else "Plain text")
+NAME_STYLES = {"callout": "Box + line (Manus style)", "box": "Box at line end", "text": "Text at line end"}
+name_style = c3.selectbox("Competitor names", list(NAME_STYLES), format_func=NAME_STYLES.get)
 
 options = ["(none)"] + visible
 highlight = st.selectbox("Our site (thicker line, drawn on top)", options,

@@ -94,7 +94,11 @@ class ChartSettings:
     hidden: list = field(default_factory=list)  # competitor names NOT to draw
     colors: dict = field(default_factory=dict)  # {"Virnig": "#EF6CC1"} overrides
     show_values: bool = True  # print the number at every point
-    name_style: str = "box"  # "box" = grey box like Manus, "text" = plain colored text
+    # How competitor names are shown:
+    #   "callout" = grey box inside the chart with a straight line to its line (Manus style)
+    #   "box"     = grey box at the right end of each line
+    #   "text"    = plain colored text at the right end of each line
+    name_style: str = "callout"
     highlight: str | None = None  # our own site, e.g. "Fecon": thicker line, drawn on top
 
     # y-axis: leave both as None for automatic.
@@ -279,19 +283,23 @@ def render_chart(history, settings=None):
     try:
         fig.subplots_adjust(left=0.035, right=0.985, top=0.975, bottom=0.105)
 
-        # --- Make room on the right for the competitor names ----------------
-        # Space between the last point and its name: wide enough that the
-        # last month's numbers (centred on the point) never touch the names.
-        last_values = [history[n].dropna().iloc[-1] for n in names]
-        widest_value = max(text_width_pt(f"{v:,.0f}", VALUE_FONT_SIZE) for v in last_values)
-        name_gap_pt = max(34, widest_value / 2 + 14) if settings.show_values else 16
-        box_pad = 0.35 if settings.name_style == "box" else 0.1
-        longest = max(text_width_pt(n, NAME_FONT_SIZE) for n in names)
-        names_space_px = (name_gap_pt + longest + 2 * box_pad * NAME_FONT_SIZE + 8) * px_per_pt
-        axes_width_px = settings.width_px * (0.985 - 0.035)
-        span = len(periods) - 0.52
-        right_extra = names_space_px * span / (axes_width_px - names_space_px)
-        ax.set_xlim(-0.48, len(periods) - 1 + max(0.52, right_extra))
+        names_at_end = settings.name_style in ("box", "text")
+        if names_at_end:
+            # --- Make room on the right for the competitor names ------------
+            # Space between the last point and its name: wide enough that the
+            # last month's numbers (centred on the point) never touch the names.
+            last_values = [history[n].dropna().iloc[-1] for n in names]
+            widest_value = max(text_width_pt(f"{v:,.0f}", VALUE_FONT_SIZE) for v in last_values)
+            name_gap_pt = max(34, widest_value / 2 + 14) if settings.show_values else 16
+            box_pad = 0.35 if settings.name_style == "box" else 0.1
+            longest = max(text_width_pt(n, NAME_FONT_SIZE) for n in names)
+            names_space_px = (name_gap_pt + longest + 2 * box_pad * NAME_FONT_SIZE + 8) * px_per_pt
+            axes_width_px = settings.width_px * (0.985 - 0.035)
+            span = len(periods) - 0.52
+            right_extra = names_space_px * span / (axes_width_px - names_space_px)
+            ax.set_xlim(-0.48, len(periods) - 1 + max(0.52, right_extra))
+        else:
+            ax.set_xlim(-0.48, len(periods) - 0.52)  # same as Manus's chart
 
         # --- Y axis: leave a little headroom above the highest value --------
         headroom = top_tick * 0.06  # room above the highest point for its label
@@ -328,10 +336,14 @@ def render_chart(history, settings=None):
         y_floor = to_px(0, 0)[1]
         y_ceiling = to_px(0, ax.get_ylim()[1])[1]
 
+        value_boxes = []  # where the numbers ended up, so name boxes can avoid them
         if settings.show_values:
-            _add_value_labels(ax, history, names, colors, x, to_px, y_floor, y_ceiling, px_per_pt)
-        _add_name_labels(ax, history, names, colors, to_px, y_floor, y_ceiling,
-                         px_per_pt, name_gap_pt, settings.name_style, box_pad)
+            value_boxes = _add_value_labels(ax, history, names, colors, x, to_px, y_floor, y_ceiling, px_per_pt)
+        if names_at_end:
+            _add_name_labels(ax, history, names, colors, to_px, y_floor, y_ceiling,
+                             px_per_pt, name_gap_pt, settings.name_style, box_pad)
+        else:
+            _add_callouts(ax, history, names, colors, to_px, value_boxes, px_per_pt)
 
         buffer = io.BytesIO()
         fig.savefig(buffer, format=settings.file_format, dpi=dpi, facecolor="white",
@@ -342,9 +354,13 @@ def render_chart(history, settings=None):
 
 
 def _add_value_labels(ax, history, names, colors, x, to_px, y_floor, y_ceiling, px_per_pt):
-    """Print the number at every point, month by month, without overlaps."""
+    """
+    Print the number at every point, month by month, without overlaps.
+    Returns the pixel rectangle (left, bottom, right, top) of every number.
+    """
     label_h = VALUE_FONT_SIZE * 1.3 * px_per_pt  # label height incl. a little air
     gap = 5 * px_per_pt  # distance between a point and its label
+    boxes = []
 
     for i in range(len(x)):
         points = []  # (name, value, pixel y of the point, wanted pixel y of label)
@@ -369,13 +385,17 @@ def _add_value_labels(ax, history, names, colors, x, to_px, y_floor, y_ceiling, 
                               low=y_floor + label_h / 2, high=y_ceiling - label_h / 2,
                               order=point_order)
 
+        point_x = to_px(i, 0)[0]
         for (name, value, point_y, wanted), label_y in zip(points, final):
             # A label squeezed into a stack with other labels is written in its
             # line's color, so you can still tell which line it belongs to.
             crowded = sum(abs(label_y - other) < label_h * 1.05 for other in final) > 1
             text_color = readable_text_color(colors[name]) if crowded else VALUE_COLOR
+            text = f"{value:,.0f}"
+            half_w = text_width_pt(text, VALUE_FONT_SIZE) * px_per_pt / 2 + 4
+            boxes.append((point_x - half_w, label_y - label_h / 2, point_x + half_w, label_y + label_h / 2))
             ax.annotate(
-                f"{value:,.0f}",
+                text,
                 xy=(i, value),
                 xytext=(0, (label_y - point_y) / px_per_pt),  # offset in points
                 textcoords="offset points",
@@ -384,6 +404,146 @@ def _add_value_labels(ax, history, names, colors, x, to_px, y_floor, y_ceiling, 
                 # White background so a line passing behind never hides the number.
                 bbox=dict(boxstyle="round,pad=0.12", facecolor="white", edgecolor="none", alpha=0.85),
             )
+    return boxes
+
+
+# ---------------------------------------------------------------------------
+# Callouts: a grey name box inside the chart with a straight line to its line
+# ---------------------------------------------------------------------------
+
+CALLOUT_PAD = 0.55  # space around the name inside its box (x font size)
+
+# How "bad" each problem is when choosing a spot for a name box.
+# The lowest total wins. 1 point = 1 pixel of leader-line length.
+COST_CROSSES_LINE = 260  # a line runs through the box
+COST_COVERS_DOT = 400  # a data point is hidden under the box
+COST_LEADER_CROSSES = 120  # the leader line crosses another line
+COST_COVERS_LEADER = 260  # the box covers another box's leader line
+
+
+def _boxes_overlap(a, b, margin=0.0):
+    return a[0] < b[2] + margin and b[0] < a[2] + margin and a[1] < b[3] + margin and b[1] < a[3] + margin
+
+
+def _clip(x0, y0, x1, y1, box):
+    """Does the straight line (x0,y0)-(x1,y1) pass through the rectangle? (Liang-Barsky clipping)"""
+    dx, dy = x1 - x0, y1 - y0
+    t_in, t_out = 0.0, 1.0
+    for p, q in ((-dx, x0 - box[0]), (dx, box[2] - x0), (-dy, y0 - box[1]), (dy, box[3] - y0)):
+        if p == 0:
+            if q < 0:
+                return False  # parallel to this edge and outside it
+            continue
+        t = q / p
+        if p < 0:
+            t_in = max(t_in, t)  # entering
+        else:
+            t_out = min(t_out, t)  # leaving
+        if t_in > t_out:
+            return False
+    return True
+
+
+def _vertical_crosses(x, y_low, y_high, p, q):
+    """Does the vertical line at x (from y_low to y_high) cross the segment p-q?"""
+    (x0, y0), (x1, y1) = p, q
+    if x0 == x1 or not (min(x0, x1) <= x <= max(x0, x1)):
+        return False
+    y = y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+    return y_low < y < y_high
+
+
+def _add_callouts(ax, history, names, colors, to_px, value_boxes, px_per_pt):
+    """
+    Put each competitor's name in a grey box near its line, with a straight
+    vertical leader line to the line - like the Manus chart, but the spots
+    are chosen automatically:
+
+      1. Try many spots: several places along the line, above and below it,
+         at different distances.
+      2. Score each spot (see the COST_ values): covering a number or another
+         name box is never allowed; covering lines, dots or leaders costs
+         points; every pixel of leader line costs 1 point.
+      3. Take the cheapest spot. Same data -> same spots, every time.
+    """
+    plot = ax.bbox.extents  # (left, bottom, right, top) of the drawing area, in pixels
+    pad_px = CALLOUT_PAD * NAME_FONT_SIZE * px_per_pt
+    box_h = NAME_FONT_SIZE * 1.15 * px_per_pt + 2 * pad_px
+    months = list(history.index)
+
+    # Every line piece and every dot, in pixels.
+    segments = {}  # name -> list of ((x0, y0), (x1, y1))
+    dots = []
+    for name in names:
+        values = history[name].to_numpy()
+        pts = [None if np.isnan(v) else tuple(to_px(i, v)) for i, v in enumerate(values)]
+        dots += [p for p in pts if p is not None]
+        segments[name] = [(pts[i], pts[i + 1]) for i in range(len(pts) - 1) if pts[i] and pts[i + 1]]
+    all_segments = [seg for segs in segments.values() for seg in segs]
+
+    placed_boxes = []
+    placed_leaders = []  # (x, y_bottom, y_top)
+
+    # Lines lowest down have the least free space (nothing below 0), so they choose first.
+    order = sorted(names, key=lambda n: (history[n].mean(), n))
+    for name in order:
+        values = history[name].to_numpy()
+        box_w = text_width_pt(name, NAME_FONT_SIZE) * px_per_pt + 2 * pad_px
+
+        # Candidate spots: (leader length, anchor point on the line, box, above/below)
+        candidates = []
+        for i in range(len(months) - 1):
+            if np.isnan(values[i]) or np.isnan(values[i + 1]):
+                continue
+            for t in (0.5, 0.35, 0.65, 0.2, 0.8):
+                anchor_x, anchor_y = to_px(i + t, values[i] + (values[i + 1] - values[i]) * t)
+                for side in (1, -1):  # 1 = box above the line, -1 = below
+                    for dist in range(int(12 * px_per_pt), int(plot[3] - plot[1]), 14):
+                        centre_y = anchor_y + side * (dist + box_h / 2)
+                        box = (anchor_x - box_w / 2, centre_y - box_h / 2,
+                               anchor_x + box_w / 2, centre_y + box_h / 2)
+                        if box[0] < plot[0] or box[2] > plot[2] or box[1] < plot[1] or box[3] > plot[3]:
+                            continue  # would stick out of the chart
+                        candidates.append((dist, anchor_x, anchor_y, box, side))
+        candidates.sort(key=lambda c: c[0])  # shortest leader first
+
+        best = None
+        for dist, anchor_x, anchor_y, box, side in candidates:
+            if best and dist >= best[0]:
+                break  # every remaining spot has a longer leader, so none can win
+            # Never allowed: covering a number or another name box.
+            if any(_boxes_overlap(box, other, 3) for other in value_boxes + placed_boxes):
+                continue
+            leader = (anchor_x, anchor_y, box[1]) if side == 1 else (anchor_x, box[3], anchor_y)
+            cost = dist
+            cost += COST_CROSSES_LINE * sum(_clip(*p, *q, box) for p, q in all_segments)
+            cost += COST_COVERS_DOT * sum(box[0] <= x <= box[2] and box[1] <= y <= box[3] for x, y in dots)
+            cost += COST_LEADER_CROSSES * sum(
+                _vertical_crosses(*leader, p, q)
+                for other, segs in segments.items() if other != name for p, q in segs)
+            cost += COST_COVERS_LEADER * sum(_clip(x, y0, x, y1, box) for x, y0, y1 in placed_leaders)
+            # A leader running through a number would hide it.
+            cost += COST_CROSSES_LINE * sum(_clip(leader[0], leader[1], leader[0], leader[2], other)
+                                            for other in value_boxes)
+            if best is None or cost < best[0]:
+                best = (cost, anchor_x, anchor_y, box, leader)
+
+        if best is None:
+            continue  # no free space at all (extremely crowded) - skip rather than overlap
+        _, anchor_x, anchor_y, box, leader = best
+        placed_boxes.append(box)
+        placed_leaders.append(leader)
+
+        to_data = ax.transData.inverted()
+        anchor = to_data.transform((anchor_x, anchor_y))
+        centre = to_data.transform(((box[0] + box[2]) / 2, (box[1] + box[3]) / 2))
+        ax.annotate(
+            name, xy=anchor, xytext=centre, textcoords="data",
+            ha="center", va="center", fontsize=NAME_FONT_SIZE,
+            color=readable_text_color(colors[name]), zorder=8,
+            bbox=dict(boxstyle=f"square,pad={CALLOUT_PAD}", facecolor=BOX_COLOR, edgecolor="none", alpha=0.96),
+            arrowprops=dict(arrowstyle="-", color=LEADER_COLOR, linewidth=2.0, shrinkA=0, shrinkB=0),
+        )
 
 
 def _add_name_labels(ax, history, names, colors, to_px, y_floor, y_ceiling,
@@ -439,6 +599,7 @@ if __name__ == "__main__":
         "test_top100.png": ("sample_data/fecon_top100_history.csv", ChartSettings()),
         "test_traffic.png": ("sample_data/fecon_traffic_history.csv", ChartSettings()),
         "test_traffic_plain_names.png": ("sample_data/fecon_traffic_history.csv", ChartSettings(name_style="text")),
+        "test_traffic_names_at_end.png": ("sample_data/fecon_traffic_history.csv", ChartSettings(name_style="box")),
         "test_top100_big_only.png": ("sample_data/fecon_top100_history.csv",
                                      ChartSettings(hidden=["Prinoth", "Denis Cimaf", "Shearex", "Mastodon"])),
         "test_traffic.svg": ("sample_data/fecon_traffic_history.csv", ChartSettings(file_format="svg")),
