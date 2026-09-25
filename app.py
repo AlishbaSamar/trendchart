@@ -1,7 +1,7 @@
 """
 app.py - the web page. Run it with:
 
-    streamlit run app.py
+    streamlit run app.py        (set APP_PASSWORD first - see README)
 
 How Streamlit works (the one thing to know):
   Every time the user clicks or types anything, Streamlit runs this WHOLE
@@ -11,12 +11,12 @@ How Streamlit works (the one thing to know):
   change the data and switch tabs before the page is drawn.
 
 Layout:
-  Sidebar           your data file: open / try demo / save
-  📊 Dashboard      pick a chart -> KPI tiles, chart, downloads, leaderboard
-  🏆 Summary        our site across every chart
-  ➕ Add month      upload this month's Semrush export
-  ✏️ Fix data       correct numbers, rename competitors
-  ⚙️ Style          who is shown, our site, names, colors, y-axis
+  Login page    password from the APP_PASSWORD environment variable (auth.py)
+  Sidebar       what's loaded, Save data file, Sign out
+  Dashboard     pick a chart -> numbers at a glance, chart, downloads, ranking
+  Summary       our site across every chart
+  Add data      Upload CSV / Enter manually / Edit existing
+  Settings      who is shown, our site, names, colors, y-axis
 """
 
 import io
@@ -27,45 +27,54 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from auth import is_signed_in, login_page, remember_sign_in, sign_out
 from chart import ChartSettings, auto_axis, pick_colors, render_chart
 from data_loader import (
     DataError,
     add_month_all,
+    csv_kind,
     histories_to_csv,
     load_histories,
     load_history,
     load_semrush_month,
+    parse_number,
     period_label,
 )
 from insights import biggest_mover, fmt, fmt_change, latest_months, leaderboard, site_summary
 
 DEMO_FILE = "sample_data/fecon_all_charts_history.csv"
 MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
-TABS = ["📊 Dashboard", "🏆 Summary", "➕ Add month", "✏️ Fix data", "⚙️ Style"]
-NAME_STYLES = {"callout": "Box + line", "box": "Box at end", "text": "Text at end"}
+TABS = ["Dashboard", "Summary", "Add data", "Settings"]
+DEFAULT_CHARTS = ["DA", "Worldwide Traffic", "US Traffic", "Top 3", "Top 10", "Top 100", "Top 3 Volume"]
+NAME_STYLES = {"callout": "Box with line", "box": "Box at line end", "text": "Text at line end"}
 
-st.set_page_config(page_title="Competitor Trend Charts", page_icon="📈", layout="wide")
+signed_in = is_signed_in()
+st.set_page_config(page_title="Trend Charts", page_icon=":material/show_chart:", layout="wide",
+                   initial_sidebar_state="expanded" if signed_in else "collapsed")
+if not signed_in:
+    login_page(side_image="assets/login_chart.png")  # stops here until the right password is typed
+remember_sign_in()
+
 st.markdown("""<style>
     .block-container {padding-top: 2.2rem; padding-bottom: 3rem;}
-    [data-testid="stMetricValue"] {font-size: 1.9rem;}
-    [data-testid="stSidebar"] h1 {font-size: 1.5rem;}
+    [data-testid="stMetricValue"] {font-size: 1.8rem;}
 </style>""", unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
 # Remembered state
 # ---------------------------------------------------------------------------
-# histories : {chart name: table} as loaded / after "Add month"
-# edits     : {chart name: table} typed corrections from "Fix data"
-# version   : changes when `histories` is replaced -> the data table starts fresh
+# histories : {chart name: table} as loaded / after adding a month
+# edits     : {chart name: table} typed corrections from "Edit existing"
+# version   : changes when `histories` is replaced -> tables on screen start fresh
 # axis      : {chart name: (top, step)} for charts with a manual y-axis
 # saved     : False when there are changes the user hasn't downloaded yet
 # flash     : a message to show once after a button did something
-# uploads   : counter used to empty the upload boxes after a successful upload
+# uploads   : counter used to empty the upload box after it was used
 
 defaults = {"histories": {}, "edits": {}, "version": 0, "axis": {}, "saved": True, "flash": None,
-            "uploads": 0, "load_errors": [], "add_errors": [], "known_names": [],
-            "editor_key": None, "editor_base": None}
+            "uploads": 0, "add_errors": [], "known_names": [], "editor_key": None, "editor_base": None,
+            "manual_key": None, "manual_base": None}
 for key, value in defaults.items():
     st.session_state.setdefault(key, value)
 state = st.session_state
@@ -91,6 +100,11 @@ def all_competitors(histories):
     return names
 
 
+def month_range(histories):
+    periods = sorted({p for h in histories.values() for p in h.index})
+    return f"{period_label(periods[0])} – {period_label(periods[-1])}" if periods else "no months"
+
+
 def guess_month_from_filename(filename):
     """ 'fecon_red_line_aug_2026.csv' -> 'Aug 2026' (or None) """
     match = re.search(r"(" + "|".join(MONTHS) + r")[a-z]*[_\-\s]*(20\d\d)", filename.lower())
@@ -109,31 +123,26 @@ def safe_file_name(text):
     return re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("_") or "chart"
 
 
+def show_errors(messages):
+    st.error("Please check:\n\n" + "\n".join(f"- {m}" for m in messages))
+
+
+# --- Button callbacks (run before the page is redrawn) -----------------------
+
 def go_to(tab, message=None):
     state.tab = tab
     state.flash = message
 
 
-# --- Button callbacks (run before the page is redrawn) -----------------------
-
-def open_data_file(upload_key):
-    file = state.get(upload_key)
-    if file is None:
-        return
-    try:
-        histories = load_histories(file, default_metric=Path(file.name).stem)
-    except DataError as e:
-        state.load_errors = e.messages
-        return
-    state.load_errors = []
+def open_histories(histories, name):
     set_histories(histories, saved=True)
     state.uploads += 1  # empties the upload box
-    go_to(TABS[0], f"Opened {file.name}: {len(histories)} charts")
+    go_to("Dashboard", f"Opened {name}: {len(histories)} charts")
 
 
 def open_demo():
     set_histories(load_histories(DEMO_FILE), saved=True)
-    go_to(TABS[0], "Demo data loaded - have a look around!")
+    go_to("Dashboard", "Demo data loaded")
 
 
 def add_month_clicked(month_data, month_text, replace):
@@ -148,7 +157,7 @@ def add_month_clicked(month_data, month_text, replace):
     state.add_errors = []
     set_histories(updated, saved=False)
     state.uploads += 1
-    go_to(TABS[0], f"{month_text} added to {len(month_data.columns)} charts. Remember to save your data file.")
+    go_to("Dashboard", f"{month_text} added to {len(month_data.columns)} charts. Remember to save your data file.")
 
 
 def mark_saved():
@@ -157,152 +166,159 @@ def mark_saved():
 
 def start_over():
     for key in list(state.keys()):
-        del state[key]
+        if key not in ("signed_in_until",):
+            del state[key]
+
+
+def sign_out_clicked():
+    start_over()
+    sign_out()
 
 
 # ---------------------------------------------------------------------------
-# Sidebar: the data file
+# Sidebar
 # ---------------------------------------------------------------------------
 
 with st.sidebar:
-    st.title("📈 Trend Charts")
+    st.title("Trend Charts")
     st.caption("Monthly SEO competitor charts")
-
-    histories = current_histories()
-    if histories:
-        all_periods = sorted({p for h in histories.values() for p in h.index})
+    if state.histories:
         with st.container(border=True):
-            st.markdown("**📁 Your data**")
-            st.markdown(f"**{len(histories)}** charts · **{len(all_competitors(histories))}** competitors  \n"
-                        f"{period_label(all_periods[0])} – {period_label(all_periods[-1])}")
+            loaded = current_histories()
+            st.markdown(f"**Your data**  \n{len(loaded)} charts · {len(all_competitors(loaded))} competitors  \n"
+                        f"{month_range(loaded)}")
             save_slot = st.container()  # filled at the end, once all edits are known
     else:
-        st.info("No data yet. Open your data file, or try the demo.")
+        st.caption("No data loaded yet.")
         save_slot = None
-
-    upload_key = f"history_upload_{state.uploads}"
-    st.file_uploader("Open data file", type="csv", key=upload_key, on_change=open_data_file, args=(upload_key,),
-                     help="The CSV you saved last month (it holds every chart).")
-    for message in state.load_errors:
-        st.error(message)
-    st.button("✨ Try demo data", on_click=open_demo, width="stretch")
-
-    with st.expander("How it works"):
-        st.markdown("1. **Open** last month's data file (first time: skip)\n"
-                    "2. **➕ Add month**: upload the new Semrush export\n"
-                    "3. **📊 Dashboard**: check and download the charts\n"
-                    "4. **💾 Save** the data file for next month")
-    if histories:
+    st.button("Try demo data", on_click=open_demo, width="stretch")
+    if state.histories:
         st.button("Start over", on_click=start_over, type="tertiary")
+    st.button("Sign out", on_click=sign_out_clicked, type="tertiary")
 
 if state.flash:
-    st.toast(state.flash, icon="✅")
+    st.toast(state.flash)
     state.flash = None
 
-tabs = st.tabs(TABS, key="tab", on_change="rerun")
-tab_dashboard, tab_summary, tab_add, tab_fix, tab_style = tabs
+tab_dashboard, tab_summary, tab_add, tab_settings = st.tabs(TABS, key="tab", on_change="rerun")
 
 
 # ---------------------------------------------------------------------------
-# ➕ Add month   (filled first: it can change the data everything else shows)
+# Add data   (filled first: it can change the data everything else shows)
 # ---------------------------------------------------------------------------
 
-with tab_add:
-    st.subheader("Add this month's numbers")
-    st.caption("One Semrush export updates every chart at once.")
+def upload_csv_section():
+    st.caption("Upload this month's export (one row per competitor, e.g. from Semrush) "
+               "or a data file you saved earlier. The app recognises which one it is.")
+    file = st.file_uploader("CSV file", type="csv", key=f"upload_{state.uploads}")
+    if file is None:
+        return
+    try:
+        kind = csv_kind(file)
+        if kind == "data file":
+            histories = load_histories(file, default_metric=Path(file.name).stem)
+        else:
+            month_data = load_semrush_month(file)
+    except DataError as e:
+        show_errors(e.messages)
+        return
+
+    if kind == "data file":
+        with st.container(border=True):
+            st.markdown(f"**Saved data file** · {len(histories)} charts · "
+                        f"{len(all_competitors(histories))} competitors · {month_range(histories)}")
+            if state.histories and not state.saved:
+                st.warning("You have unsaved changes. Opening this file replaces the data on screen.")
+            st.button("Open this file", type="primary", on_click=open_histories, args=(histories, file.name))
+        return
 
     with st.container(border=True):
-        st.markdown("**① Upload the Semrush competitor export**")
-        semrush_file = st.file_uploader("Semrush export (CSV)", type="csv", key=f"semrush_{state.uploads}",
-                                        label_visibility="collapsed")
-
-    month_data = None
-    if semrush_file is not None:
-        try:
-            month_data = load_semrush_month(semrush_file)
-        except DataError as e:
-            for message in e.messages:
-                st.error(message)
-
-    if month_data is not None:
-        with st.container(border=True):
-            st.markdown("**② Check the month**")
-            c1, c2 = st.columns([1, 2], vertical_alignment="bottom")
-            month_text = c1.text_input("Month", guess_month_from_filename(semrush_file.name)
-                                       or next_month(state.histories), help="e.g. Sep 2026")
-            replace = c2.checkbox("This month is already there - replace it")
-
-            st.caption(f"Found **{len(month_data)} competitors** and **{len(month_data.columns)} charts**: "
-                       + ", ".join(month_data.columns))
-            with st.expander("See the numbers"):
-                st.dataframe(month_data, width="stretch")
-
-            known = all_competitors(state.histories)
-            if known:
-                new_names = [n for n in month_data.index if n not in known]
-                missing = [n for n in known if n not in month_data.index]
-                if new_names:
-                    st.warning("**New names** (they'll get their own line): " + ", ".join(new_names)
-                               + "  \nIf one is just spelled differently, fix it in ✏️ Fix data → Rename.")
-                if missing:
-                    st.info("**Not in this file** (empty this month): " + ", ".join(missing))
-
-        with st.container(border=True):
-            st.markdown("**③ Add it**")
-            st.button(f"Add {month_text} to all {len(month_data.columns)} charts", type="primary",
-                      on_click=add_month_clicked, args=(month_data, month_text, replace))
-            for message in state.add_errors:
-                st.error(message)
+        st.markdown(f"**Monthly export** · {len(month_data)} competitors · {len(month_data.columns)} charts "
+                    f"({', '.join(month_data.columns)})")
+        c1, c2 = st.columns([1, 2], vertical_alignment="bottom")
+        month_text = c1.text_input("Month", guess_month_from_filename(file.name) or next_month(state.histories),
+                                   help="e.g. Sep 2026")
+        replace = c2.checkbox("This month is already there - replace it", key="replace_upload")
+        with st.expander("Show the numbers"):
+            st.dataframe(month_data, width="stretch")
+        name_warnings(month_data.index)
+        st.button(f"Add {month_text}", type="primary", on_click=add_month_clicked,
+                  args=(month_data, month_text, replace))
+        if state.add_errors:
+            show_errors(state.add_errors)
 
 
-# ---------------------------------------------------------------------------
-# No data yet: a friendly start screen
-# ---------------------------------------------------------------------------
+def manual_section():
+    st.caption("Type the numbers for one month. Leave a cell empty if you don't have it. "
+               "Use the + below the table to add a competitor.")
+    c1, c2 = st.columns([1, 2], vertical_alignment="bottom")
+    month_text = c1.text_input("Month", next_month(state.histories), key=f"manual_month_{state.version}",
+                               help="e.g. Sep 2026")
+    replace = c2.checkbox("This month is already there - replace it", key="replace_manual")
 
-if not state.histories:
-    with tab_dashboard:
-        st.header("👋 Welcome")
-        st.markdown("Turn your monthly Semrush exports into clean competitor charts - no editing needed.")
-        c1, c2, c3 = st.columns(3)
-        with c1.container(border=True, height="stretch"):
-            st.markdown("#### 🆕 First time?")
-            st.markdown("Open the **➕ Add month** tab and upload your Semrush competitor export.")
-        with c2.container(border=True, height="stretch"):
-            st.markdown("#### 📅 Every month")
-            st.markdown("Open **last month's data file** in the sidebar, then add the new month.")
-        with c3.container(border=True, height="stretch"):
-            st.markdown("#### 👀 Just looking?")
-            st.markdown("Load example data to see how it works.")
-            st.button("✨ Try demo data", on_click=open_demo, type="primary", key="demo_main")
-    for tab in (tab_summary, tab_fix, tab_style):
-        tab.info("No data yet - start in 📊 Dashboard.")
-    st.stop()
+    # One row per competitor, one column per chart - the same shape as a Semrush export.
+    charts = list(state.histories) or DEFAULT_CHARTS
+    competitors = all_competitors(state.histories)
+    manual_key = f"manual_{state.version}"
+    if state.manual_key != manual_key:  # a fresh, stable starting table (see "Edit existing" below)
+        state.manual_key = manual_key
+        state.manual_base = pd.DataFrame({"Competitor": competitors or [""],
+                                          **{c: [""] * max(len(competitors), 1) for c in charts}})
+    table = st.data_editor(
+        state.manual_base, num_rows="dynamic", hide_index=True, width="stretch", key=manual_key,
+        column_config={"Competitor": st.column_config.TextColumn("Competitor", required=True),
+                       **{c: st.column_config.TextColumn(c, help="e.g. 1234, 1,234 or 1.2K") for c in charts}},
+    )
+
+    # Turn the table into the same shape load_semrush_month() gives, with the same number rules.
+    errors, rows = [], {}
+    for i, row in table.iterrows():
+        name = str(row["Competitor"] or "").strip()
+        values = {}
+        for chart_name in charts:
+            try:
+                values[chart_name] = parse_number(row[chart_name])
+            except ValueError:
+                errors.append(f"Row {i + 1}, {chart_name}: '{row[chart_name]}' is not a number")
+        if not name:
+            if any(v is not None for v in values.values()):
+                errors.append(f"Row {i + 1}: the competitor name is empty")
+            continue
+        if name in rows:
+            errors.append(f"'{name}' is in the table twice")
+        rows[name] = values
+    month_data = pd.DataFrame.from_dict(rows, orient="index", columns=charts, dtype=float).dropna(axis=1, how="all")
+
+    if errors:
+        show_errors(errors)
+    name_warnings(month_data.index)
+    st.button(f"Add {month_text}", type="primary", on_click=add_month_clicked,
+              args=(month_data, month_text, replace), disabled=bool(errors) or month_data.empty,
+              help=None if not month_data.empty else "Type at least one number first")
+    if state.add_errors:
+        show_errors(state.add_errors)
 
 
-# ---------------------------------------------------------------------------
-# 📊 Dashboard, part 1: which chart (other tabs need to know)
-# ---------------------------------------------------------------------------
+def name_warnings(new_names_list):
+    """Point out names that don't match the saved data - usually a spelling difference."""
+    known = all_competitors(state.histories)
+    if not known:
+        return
+    new_names = [n for n in new_names_list if n not in known]
+    missing = [n for n in known if n not in new_names_list]
+    if new_names:
+        st.warning("New names (they'll get their own line): " + ", ".join(new_names)
+                   + ". If one is only spelled differently, rename it under Edit existing.")
+    if missing:
+        st.info("Not included this month (left empty): " + ", ".join(missing))
 
-chart_names = list(current_histories())
-if state.get("metric") not in chart_names:
-    state.metric = chart_names[0]
 
-with tab_dashboard:
-    metric = st.pills("Chart", chart_names, key="metric", required=True, label_visibility="collapsed")
-    dashboard_body = st.container()  # filled after Fix data and Style
-
-
-# ---------------------------------------------------------------------------
-# ✏️ Fix data
-# ---------------------------------------------------------------------------
-
-with tab_fix:
-    st.subheader("Fix numbers")
+def edit_existing_section():
+    chart_names = list(current_histories())
     if state.get("fix_metric") not in chart_names:
-        state.fix_metric = metric
-    fix_metric = st.segmented_control("Chart to fix", chart_names, key="fix_metric", required=True)
-    st.caption("Click a cell to change it. Leave it empty if there's no data that month. "
-               "Use **+** below the table to add a month.")
+        state.fix_metric = state.get("metric") if state.get("metric") in chart_names else chart_names[0]
+    fix_metric = st.selectbox("Chart", chart_names, key="fix_metric")
+    st.caption("Click a cell to change it. Leave it empty if there's no data that month.")
 
     # The table must start from the same data while it's on screen, otherwise
     # Streamlit applies your typing twice. So we keep a snapshot per chart.
@@ -320,10 +336,10 @@ with tab_fix:
             state.saved = False
         state.edits[fix_metric] = fixed
     except DataError as e:
-        st.error("Please fix these cells:\n\n" + "\n".join(f"- {m}" for m in e.messages))
+        show_errors(e.messages)
 
     with st.expander("Rename or add a competitor (all charts)"):
-        st.caption("Rename when Semrush spells a name differently, e.g. *Diamond Mowers* → *Diamond Mower*.")
+        st.caption("Rename when an export spells a name differently, e.g. Diamond Mowers → Diamond Mower.")
         names_now = all_competitors(current_histories())
         c1, c2 = st.columns(2)
         with c1:
@@ -347,8 +363,53 @@ with tab_fix:
                     st.rerun()
 
 
+with tab_add:
+    modes = ["Upload CSV", "Enter manually"] + (["Edit existing"] if state.histories else [])
+    if state.get("add_mode") not in modes:
+        state.add_mode = modes[0]
+    mode = st.segmented_control("How do you want to add data?", modes, key="add_mode", required=True)
+    if mode == "Upload CSV":
+        upload_csv_section()
+    elif mode == "Enter manually":
+        manual_section()
+    else:
+        edit_existing_section()
+
+
 # ---------------------------------------------------------------------------
-# ⚙️ Style
+# No data yet: a simple start screen
+# ---------------------------------------------------------------------------
+
+if not state.histories:
+    with tab_dashboard:
+        st.header("Welcome")
+        st.markdown("Turn your monthly competitor numbers into clean charts.")
+        with st.container(border=True):
+            st.markdown("**To start**, add data: upload a CSV (a monthly export or a saved data file) "
+                        "or type the numbers in by hand.")
+            with st.container(horizontal=True):
+                st.button("Add data", type="primary", on_click=go_to, args=("Add data",))
+                st.button("Try demo data", on_click=open_demo, key="demo_main")
+    for tab in (tab_summary, tab_settings):
+        tab.info("No data yet. Start in Add data.")
+    st.stop()
+
+
+# ---------------------------------------------------------------------------
+# Dashboard, part 1: which chart (other tabs need to know)
+# ---------------------------------------------------------------------------
+
+chart_names = list(current_histories())
+if state.get("metric") not in chart_names:
+    state.metric = chart_names[0]
+
+with tab_dashboard:
+    metric = st.pills("Chart", chart_names, key="metric", required=True, label_visibility="collapsed")
+    dashboard_body = st.container()  # filled after Settings
+
+
+# ---------------------------------------------------------------------------
+# Settings
 # ---------------------------------------------------------------------------
 
 histories = current_histories()
@@ -365,8 +426,7 @@ state.known_names = list(names)
 state.setdefault("show_values", True)
 state.setdefault("name_style", "callout")
 
-with tab_style:
-    st.subheader("Style")
+with tab_settings:
     st.caption("These settings apply to every chart.")
     with st.container(border=True):
         visible = st.multiselect("Competitors to show", names, key="visible",
@@ -376,12 +436,12 @@ with tab_style:
             state.our_site = "Fecon" if "Fecon" in site_options else "(none)"
         c1, c2, c3 = st.columns([2, 2, 1], vertical_alignment="bottom")
         our_site = c1.selectbox("Our site", site_options, key="our_site",
-                                help="Drawn as a thicker line on top, and used for the dashboard tiles.")
+                                help="Drawn as a thicker line on top, and used for the numbers at a glance.")
         name_style = c2.segmented_control("Competitor names", list(NAME_STYLES), key="name_style",
                                           format_func=NAME_STYLES.get, required=True)
         show_values = c3.toggle("Show numbers", key="show_values")
 
-    with st.expander("🎨 Colors"):
+    with st.expander("Colors"):
         st.caption("Known competitors keep fixed colors (Fecon is always red). Changes here last until you "
                    "close the page.")
         default_colors = pick_colors(names)
@@ -393,7 +453,7 @@ with tab_style:
     max_value = float(history[shown_here].max().max()) if shown_here else 0.0
     auto_top, auto_step = auto_axis(max_value) if shown_here else (0, 0)
 
-    with st.expander(f"📏 Y-axis for {metric}"):
+    with st.expander(f"Y-axis for {metric}"):
         st.caption(f"Automatic: 0 to {auto_top:,.0f} in steps of {auto_step:,.0f}.")
         manual = st.toggle("Set it myself", value=metric in state.axis, key=f"manual_{metric}")
         if manual and shown_here:
@@ -432,12 +492,12 @@ def make_chart(history, settings):
 
 
 # ---------------------------------------------------------------------------
-# 📊 Dashboard, part 2
+# Dashboard, part 2
 # ---------------------------------------------------------------------------
 
 with dashboard_body:
     if not shown_here:
-        st.warning("None of the shown competitors has data in this chart. Check ⚙️ Style.")
+        st.warning("None of the shown competitors has data in this chart. Check Settings.")
     else:
         last, previous = latest_months(history)
         board = leaderboard(history, shown_here)
@@ -446,7 +506,7 @@ with dashboard_body:
         leader = board.iloc[0]
         compare = f"vs {period_label(previous)}" if previous else "first month"
 
-        # --- KPI tiles ---------------------------------------------------------
+        # --- Numbers at a glance --------------------------------------------------
         k1, k2, k3, k4 = st.columns(4)
         TILE = 190  # all four tiles the same height (only the first has a trend line)
         if mine:
@@ -456,23 +516,23 @@ with dashboard_body:
                       help=f"{site}'s {metric}, {compare}")
             move = mine["rank_move"]
             k2.metric("Rank", f"#{mine['rank']} of {mine['of']}",
-                      None if not move else f"{move:+d} place{'s' if abs(move) > 1 else ''}", border=True, height=TILE,
-                      help=f"{site}'s position among the competitors shown, {compare}")
+                      None if not move else f"{move:+d} place{'s' if abs(move) > 1 else ''}",
+                      border=True, height=TILE, help=f"{site}'s position among the competitors shown, {compare}")
         elif site:
             k1.metric(f"{site} · {period_label(last)}", "No data", border=True, height=TILE,
                       help=f"{site} has no {metric} number for {period_label(last)}.")
             k2.metric("Competitors", len(board), border=True, height=TILE)
         else:
             k1.metric(f"Total · {period_label(last)}", fmt(board["Value"].sum()), border=True, height=TILE,
-                      help="Pick 'Our site' in ⚙️ Style to see your own numbers here.")
+                      help="Pick 'Our site' in Settings to see your own numbers here.")
             k2.metric("Competitors", len(board), border=True, height=TILE)
-        k3.metric("🏆 Leader", str(leader["Competitor"]), fmt(leader["Value"]), delta_color="off",
+        k3.metric("Leader", str(leader["Competitor"]), fmt(leader["Value"]), delta_color="off",
                   delta_arrow="off", border=True, height=TILE, help=f"Highest {metric} in {period_label(last)}")
         if mover is not None:
-            k4.metric("🚀 Biggest move", str(mover["Competitor"]), fmt_change(mover["Change"], mover["Change %"]),
+            k4.metric("Biggest change", str(mover["Competitor"]), fmt_change(mover["Change"], mover["Change %"]),
                       border=True, height=TILE, help=f"Largest change {compare}")
         else:
-            k4.metric("🚀 Biggest move", "–", border=True, height=TILE, help="Needs two months of data")
+            k4.metric("Biggest change", "–", border=True, height=TILE, help="Needs two months of data")
 
         # --- The chart ----------------------------------------------------------
         # A trend line needs at least two months. With one month every point sits
@@ -489,17 +549,17 @@ with dashboard_body:
                 st.image(png, width="stretch")
         else:
             with st.container(border=True):
-                st.markdown(f"#### 📈 The {metric} chart needs at least 2 months")
+                st.markdown(f"#### The {metric} chart needs at least 2 months")
                 st.markdown(f"Right now there is only **{period_label(last)}**, so there's no line to draw yet. "
                             "The numbers for this month are in the table below.")
-                st.markdown("**To see the trend:** open last month's data file in the sidebar *first*, "
-                            "then add this month in ➕ Add month.")
+                st.markdown("**To see the trend:** open a saved data file under Add data first, "
+                            "then add this month.")
 
         # --- Downloads ----------------------------------------------------------
         # The ZIP and SVG are only built when clicked, in a background thread that
         # CAN'T read st.session_state - so everything they need is prepared now.
         file_end = f"{history.index[0]}_to_{history.index[-1]}"
-        zip_jobs = [(f"{safe_file_name(m)}_{file_end}.png", h, settings_for(m))
+        zip_jobs = [(f"{safe_file_name(m)}_{h.index[0]}_to_{h.index[-1]}.png", h, settings_for(m))
                     for m, h in histories.items() if len(h) >= 2 and any(n in h.columns for n in visible)]
         svg_settings = settings_for(metric, "svg")
 
@@ -516,11 +576,11 @@ with dashboard_body:
         chart_file = f"{safe_file_name(metric)}_{file_end}"
         with st.container(horizontal=True):
             if has_trend:
-                st.download_button("⬇ Download this chart", png, f"{chart_file}.png", "image/png",
+                st.download_button("Download chart", png, f"{chart_file}.png", "image/png",
                                    type="primary", on_click="ignore", help="PNG, 2727 × 1087 pixels")
             if zip_jobs:
                 every_month = sorted({p for _, h, _ in zip_jobs for p in h.index})
-                st.download_button(f"⬇ All {len(zip_jobs)} charts (ZIP)", all_charts_zip,
+                st.download_button(f"Download all {len(zip_jobs)} charts (ZIP)", all_charts_zip,
                                    f"charts_{every_month[0]}_to_{every_month[-1]}.zip", "application/zip",
                                    on_click="ignore", help="Every chart that has at least 2 months")
             if has_trend:
@@ -528,10 +588,10 @@ with dashboard_body:
                                    "image/svg+xml", on_click="ignore", type="tertiary",
                                    help="Vector file for designers")
 
-        # --- Leaderboard ----------------------------------------------------------
-        st.markdown(f"#### 🏅 {metric} · {period_label(last)}")
+        # --- Ranking ----------------------------------------------------------------
+        st.markdown(f"#### Ranking · {metric} · {period_label(last)}")
         table = board.copy()
-        table["Competitor"] = [("⭐ " if n == site else "") + n for n in table["Competitor"]]
+        table["Competitor"] = [n + (" (our site)" if n == site else "") for n in table["Competitor"]]
         table["Change"] = [fmt_change(c, p) or "–" for c, p in zip(board["Change"], board["Change %"])]
         is_da = metric.strip().upper() == "DA"
         st.dataframe(
@@ -549,23 +609,22 @@ with dashboard_body:
 
 
 # ---------------------------------------------------------------------------
-# 🏆 Summary: our site across every chart
+# Summary: our site across every chart
 # ---------------------------------------------------------------------------
 
 with tab_summary:
     if not site:
-        st.info("Choose **Our site** in ⚙️ Style to see how it does across all charts.")
+        st.info("Choose 'Our site' in Settings to see how it does across all charts.")
     else:
         st.subheader(f"{site} across all charts")
         rows = []
         cards = st.columns(4)
         for i, (chart_name, chart_history) in enumerate(histories.items()):
-            chart_names_shown = [n for n in visible if n in chart_history.columns]
-            info = site_summary(chart_history, chart_names_shown, site)
+            info = site_summary(chart_history, [n for n in visible if n in chart_history.columns], site)
             if info is None:
                 continue
             last_here, _ = latest_months(chart_history)
-            cards[i % 4].metric(
+            cards[len(rows) % 4].metric(
                 chart_name, fmt(info["value"]), fmt_change(info["change"], info["change_pct"]), border=True,
                 chart_data=info["trend"] if len(info["trend"]) > 1 else None, chart_type="area",
                 help=f"Rank #{info['rank']} of {info['of']} in {period_label(last_here)}",
@@ -589,8 +648,8 @@ with tab_summary:
 if save_slot is not None:
     with save_slot:
         if not state.saved:
-            st.warning("Unsaved changes", icon="⚠️")
-        st.download_button("💾 Save data file", histories_to_csv(histories),
+            st.warning("Unsaved changes")
+        st.download_button("Save data file", histories_to_csv(histories),
                            f"trend_data_{max(p for h in histories.values() for p in h.index)}.csv", "text/csv",
                            type="primary" if not state.saved else "secondary", width="stretch",
-                           on_click=mark_saved, help="Keep this file - open it next month to continue.")
+                           on_click=mark_saved, help="Keep this file - upload it next month to continue.")

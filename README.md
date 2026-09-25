@@ -13,6 +13,20 @@ python -m venv .venv
 .venv\Scripts\python -m pip install -r requirements.txt
 ```
 
+## Password (required)
+
+The app asks for a password. It is read from the **APP_PASSWORD** environment variable - it is never in the code.
+
+- **Streamlit Cloud:** App → Settings → **Secrets** → add `APP_PASSWORD = "your-password"` → Save.
+- **On your PC:** either set it when starting the app (PowerShell):
+  ```
+  $env:APP_PASSWORD = "your-password"
+  .venv\Scripts\streamlit run app.py
+  ```
+  or create `.streamlit/secrets.toml` with `APP_PASSWORD = "your-password"` (this file is git-ignored).
+
+After signing in, the browser stays signed in for 24 hours. Changing the password signs everyone out.
+
 ## Run
 
 ```
@@ -23,24 +37,24 @@ Then open http://localhost:8501
 
 ## Monthly workflow
 
-The app has a sidebar for your **data file** and 5 tabs:
+The app has a sidebar (what's loaded, **Save data file**, **Sign out**) and 4 tabs:
 
 | Tab | What for |
 |---|---|
-| 📊 **Dashboard** | Pick a chart (one click), see KPI tiles (our site, rank, leader, biggest move), the chart, downloads and a leaderboard |
-| 🏆 **Summary** | Our site across every chart at a glance |
-| ➕ **Add month** | Upload this month's Semrush export - it updates every chart at once |
-| ✏️ **Fix data** | Correct a number, rename a competitor spelled differently |
-| ⚙️ **Style** | Who is shown, our site, how names are shown, colors, y-axis |
+| **Dashboard** | Pick a chart: numbers at a glance (our site, rank, leader, biggest change), the chart, downloads, ranking |
+| **Summary** | Our site across every chart |
+| **Add data** | **Upload CSV** (a monthly export or a saved data file - recognised automatically), **Enter manually**, or **Edit existing** |
+| **Settings** | Who is shown, our site, how names are shown, colors, y-axis |
 
 Each month:
 
-1. Sidebar → **Open data file**: last month's file. (First time: skip.)
-2. **➕ Add month** → upload the Semrush export → check the month → **Add**.
-3. **📊 Dashboard** → check the charts → **Download this chart** or **All charts (ZIP)**.
-4. Sidebar → **💾 Save data file**. Keep it - you open it next month.
+1. **Add data → Upload CSV**: last month's saved data file → **Open this file**. (First time: skip.)
+2. **Add data → Upload CSV** again: this month's Semrush export → check the month → **Add**.
+   No export? Use **Enter manually** and type the numbers.
+3. **Dashboard**: check the charts → **Download chart** or **Download all charts (ZIP)**.
+4. Sidebar → **Save data file**. Keep it - you upload it next month.
 
-New here? Click **✨ Try demo data** in the sidebar.
+New here? Click **Try demo data** in the sidebar.
 
 ## Data file format
 
@@ -61,11 +75,13 @@ Top 100,2026-01,3369,5710,3089
 
 | File | What it does |
 |---|---|
-| `app.py` | The web page (Streamlit): sidebar + 5 tabs |
+| `app.py` | The web page (Streamlit): sidebar + 4 tabs |
+| `auth.py` | Password login (APP_PASSWORD) with a 24-hour sign-in cookie |
 | `insights.py` | Dashboard numbers: rank, change vs last month, share, biggest move |
 | `chart.py` | `render_chart()`: draws the chart, prevents label overlaps. Colors in `DEFAULT_COLORS` |
 | `data_loader.py` | Reads and checks CSV files, parses `K`/`M`/commas |
-| `sample_data/` | Test data: `fecon_all_charts_history.csv` (US Traffic + Top 100), one Semrush export |
+| `sample_data/` | Test data: `fecon_all_charts_history.csv` (US Traffic + Top 100), Semrush exports (`TEST_` = dummy numbers) |
+| `assets/` | Picture for the login page |
 | `fonts/` | Liberation Sans, bundled so charts look the same on every PC |
 | `reference/` | Original PRD, Manus's chart and code (for reference only) |
 

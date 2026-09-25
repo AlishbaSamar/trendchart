@@ -412,6 +412,9 @@ def _add_value_labels(ax, history, names, colors, x, to_px, y_floor, y_ceiling, 
 # ---------------------------------------------------------------------------
 
 CALLOUT_PAD = 0.55  # space around the name inside its box (x font size)
+CALLOUT_MIN_LINE_PT = 30  # shortest line from a name box to its line (~42 px) - long enough to see
+CALLOUT_LINE_COLOR = "#A3A3A3"  # darker than the grid so the line is easy to follow
+CALLOUT_LINE_WIDTH = 2.2
 
 # How "bad" each problem is when choosing a spot for a name box.
 # The lowest total wins. 1 point = 1 pixel of leader-line length.
@@ -498,7 +501,7 @@ def _add_callouts(ax, history, names, colors, to_px, value_boxes, px_per_pt):
             for t in (0.5, 0.35, 0.65, 0.2, 0.8):
                 anchor_x, anchor_y = to_px(i + t, values[i] + (values[i + 1] - values[i]) * t)
                 for side in (1, -1):  # 1 = box above the line, -1 = below
-                    for dist in range(int(12 * px_per_pt), int(plot[3] - plot[1]), 14):
+                    for dist in range(int(CALLOUT_MIN_LINE_PT * px_per_pt), int(plot[3] - plot[1]), 14):
                         centre_y = anchor_y + side * (dist + box_h / 2)
                         box = (anchor_x - box_w / 2, centre_y - box_h / 2,
                                anchor_x + box_w / 2, centre_y + box_h / 2)
@@ -512,7 +515,7 @@ def _add_callouts(ax, history, names, colors, to_px, value_boxes, px_per_pt):
                 anchor_x, anchor_y = to_px(i, values[i])
                 for shift in (0, -(box_w / 2 - 12), box_w / 2 - 12):
                     for side in (1, -1):
-                        for dist in range(int(12 * px_per_pt), int(plot[3] - plot[1]), 14):
+                        for dist in range(int(CALLOUT_MIN_LINE_PT * px_per_pt), int(plot[3] - plot[1]), 14):
                             centre_x = anchor_x + shift
                             centre_y = anchor_y + side * (dist + box_h / 2)
                             box = (centre_x - box_w / 2, centre_y - box_h / 2,
@@ -537,6 +540,9 @@ def _add_callouts(ax, history, names, colors, to_px, value_boxes, px_per_pt):
                 _vertical_crosses(*leader, p, q)
                 for other, segs in segments.items() if other != name for p, q in segs)
             cost += COST_COVERS_LEADER * sum(_clip(x, y0, x, y1, box) for x, y0, y1 in placed_leaders)
+            # ...and the other way round: this box's line must not run through a box already placed.
+            cost += COST_COVERS_LEADER * sum(_clip(leader[0], leader[1], leader[0], leader[2], other)
+                                             for other in placed_boxes)
             # A leader running through a number would hide it.
             cost += COST_CROSSES_LINE * sum(_clip(leader[0], leader[1], leader[0], leader[2], other)
                                             for other in value_boxes)
@@ -557,7 +563,8 @@ def _add_callouts(ax, history, names, colors, to_px, value_boxes, px_per_pt):
             ha="center", va="center", fontsize=NAME_FONT_SIZE,
             color=readable_text_color(colors[name]), zorder=8,
             bbox=dict(boxstyle=f"square,pad={CALLOUT_PAD}", facecolor=BOX_COLOR, edgecolor="none", alpha=0.96),
-            arrowprops=dict(arrowstyle="-", color=LEADER_COLOR, linewidth=2.0, shrinkA=0, shrinkB=0),
+            arrowprops=dict(arrowstyle="-", color=CALLOUT_LINE_COLOR, linewidth=CALLOUT_LINE_WIDTH,
+                            shrinkA=0, shrinkB=0),
         )
 
 

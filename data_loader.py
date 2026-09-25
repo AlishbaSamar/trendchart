@@ -67,8 +67,8 @@ def parse_number(text):
         ""        -> None   (missing value)
         "abc"     -> raises ValueError
     """
-    if text is None:
-        return None
+    if text is None or (not isinstance(text, str) and pd.isna(text)):
+        return None  # empty cell (tables on the web page give NaN for these)
     cleaned = str(text).strip()
     if cleaned.lower() in EMPTY_VALUES:
         return None
@@ -281,6 +281,21 @@ def _finish(history):
 # ---------------------------------------------------------------------------
 # 5. Semrush monthly exports
 # ---------------------------------------------------------------------------
+
+def csv_kind(source):
+    """
+    Look at the header row and tell what kind of CSV this is:
+      "data file"  - a saved data file (first column 'metric' or 'period')
+      "month"      - one month's export, one row per competitor (e.g. from Semrush)
+    Uploaded files are rewound afterwards so they can be read again.
+    """
+    text = _read_text(source)
+    if hasattr(source, "seek"):
+        source.seek(0)
+    header = next(csv.reader(io.StringIO(text)), [])
+    first = header[0].strip().lower() if header else ""
+    return "data file" if first in ("metric", "period") else "month"
+
 
 def load_semrush_month(source):
     """
