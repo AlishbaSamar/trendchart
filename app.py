@@ -424,6 +424,7 @@ else:
     state.visible = [n for n in state.visible if n in names] + newcomers
 state.known_names = list(names)
 state.setdefault("show_values", True)
+state.setdefault("split_chart", True)
 state.setdefault("name_style", "callout")
 
 with tab_settings:
@@ -440,11 +441,15 @@ with tab_settings:
         name_style = c2.segmented_control("Competitor names", list(NAME_STYLES), key="name_style",
                                           format_func=NAME_STYLES.get, required=True)
         show_values = c3.toggle("Show numbers", key="show_values")
+        split = st.toggle("Split the chart when a few sites are much bigger than the rest", key="split_chart",
+                          help="Draws the big sites on top and zooms in on the small ones below, "
+                               "so their lines don't get squashed together at the bottom.")
 
     with st.expander("Colors"):
-        st.caption("Known competitors keep fixed colors (Fecon is always red). Changes here last until you "
-                   "close the page.")
-        default_colors = pick_colors(names)
+        st.caption("Our site is red by default, other known competitors keep fixed colors. Changes here last "
+                   "until you close the page.")
+        site_choice = None if our_site == "(none)" else our_site
+        default_colors = pick_colors(names, {site_choice: "#DE061D"} if site_choice else None)
         picker_columns = st.columns(4)
         colors = {n: picker_columns[i % 4].color_picker(n, default_colors[n], key=f"color_{n}")
                   for i, n in enumerate(visible)}
@@ -482,7 +487,7 @@ def settings_for(chart_name, file_format="png"):
     y_max, y_step = state.axis.get(chart_name, (None, None))
     return ChartSettings(hidden=[n for n in names if n not in visible], colors=colors, show_values=show_values,
                          name_style=name_style, highlight=site, y_max=y_max, y_step=y_step,
-                         file_format=file_format)
+                         split="auto" if split else "off", file_format=file_format)
 
 
 @st.cache_data(show_spinner="Drawing chart...")

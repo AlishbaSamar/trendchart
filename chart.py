@@ -30,6 +30,7 @@ import numpy as np
 from matplotlib import colors as mcolors
 from matplotlib import font_manager
 from matplotlib.font_manager import FontProperties
+from matplotlib.lines import Line2D
 from matplotlib.textpath import TextPath
 
 from data_loader import period_label
@@ -100,6 +101,10 @@ class ChartSettings:
     #   "text"    = plain colored text at the right end of each line
     name_style: str = "callout"
     highlight: str | None = None  # our own site, e.g. "Fecon": thicker line, drawn on top
+
+    # "auto": when a few sites are far bigger than the rest, draw the chart in two
+    # parts (big sites on top, a zoomed-in part for the small ones below). "off": never.
+    split: str = "auto"
 
     # y-axis: leave both as None for automatic.
     # Manual values are used exactly - points above y_max are cut off (the app warns first).
@@ -197,6 +202,42 @@ def y_axis(max_value, settings):
     return ticks, top_tick
 
 
+# When to split a chart in two parts (all three must be true):
+SPLIT_JUMP = 4  # the smallest "big" site peaks at least 4x higher than the largest "small" one
+SPLIT_SHARE = 0.12  # the small sites would use less than 12% of the chart's height
+SPLIT_MIN_SQUASHED = 3  # and at least 3 lines would be squashed together
+
+
+def split_groups(history, names):
+    """
+    Decide whether the chart needs two parts. Returns (big sites, small sites)
+    or None.
+
+    How: sort the sites by their highest value and find the biggest jump between
+    two neighbours, e.g. 19,700 -> 1,100. Sites above the jump go on top.
+    """
+    peaks = sorted(((float(history[n].max()), n) for n in names), reverse=True)
+    if len(peaks) < 2:
+        return None
+    jumps = [(peaks[i][0] / peaks[i + 1][0] if peaks[i + 1][0] > 0 else math.inf, i)
+             for i in range(len(peaks) - 1)]
+    jump, i = max(jumps)
+    big = {n for _, n in peaks[:i + 1]}
+    small_peak = peaks[i + 1][0]
+    small_count = len(peaks) - i - 1
+    if jump >= SPLIT_JUMP and small_peak < SPLIT_SHARE * peaks[0][0] and small_count >= SPLIT_MIN_SQUASHED:
+        return [n for n in names if n in big], [n for n in names if n not in big]
+    return None
+
+
+def range_axis(low, high, max_ticks=5):
+    """Ticks for the TOP part of a split chart: it doesn't have to start at 0."""
+    step = nice_step(max(high - low, 1), max_ticks)
+    start = math.floor(low / step) * step
+    top_tick = math.ceil(high / step) * step
+    return np.arange(start, top_tick + step / 2, step), start, top_tick
+
+
 # ---------------------------------------------------------------------------
 # Label placement - the part that stops labels from overlapping
 # ---------------------------------------------------------------------------
@@ -272,14 +313,24 @@ def render_chart(history, settings=None):
 
     periods = list(history.index)
     x = np.arange(len(periods))
-    max_value = float(history[names].max().max())
-    ticks, top_tick = y_axis(max_value, settings)
 
     dpi = settings.dpi
     px_per_pt = dpi / 72  # converts font sizes (points) to pixels
+    manual_axis = bool(settings.y_max or settings.y_step)
 
-    fig, ax = plt.subplots(figsize=(settings.width_px / dpi, settings.height_px / dpi),
-                           dpi=dpi, facecolor="white")
+    # One part, or two parts when a few sites dwarf the rest (never with a manual y-axis).
+    groups = None
+    if settings.split == "auto" and not manual_axis:
+        groups = split_groups(history, names)
+
+    figsize = (settings.width_px / dpi, settings.height_px / dpi)
+    if groups:
+        fig, (ax_top, ax_bottom) = plt.subplots(2, 1, sharex=True, figsize=figsize, dpi=dpi, facecolor="white",
+                                                gridspec_kw={"height_ratios": [1, 1.35], "hspace": 0.12})
+        panels = [(ax_top, groups[0], "top"), (ax_bottom, groups[1], "bottom")]
+    else:
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi, facecolor="white")
+        panels = [(ax, names, "single")]
     try:
         fig.subplots_adjust(left=0.035, right=0.985, top=0.975, bottom=0.105)
 
@@ -297,53 +348,16 @@ def render_chart(history, settings=None):
             axes_width_px = settings.width_px * (0.985 - 0.035)
             span = len(periods) - 0.52
             right_extra = names_space_px * span / (axes_width_px - names_space_px)
-            ax.set_xlim(-0.48, len(periods) - 1 + max(0.52, right_extra))
+            x_limits = (-0.48, len(periods) - 1 + max(0.52, right_extra))
         else:
-            ax.set_xlim(-0.48, len(periods) - 0.52)  # same as Manus's chart
+            x_limits = (-0.48, len(periods) - 0.52)  # same as Manus's chart
 
-        # --- Y axis: leave a little headroom above the highest value --------
-        headroom = top_tick * 0.06  # room above the highest point for its label
-        top = top_tick if settings.y_max else max(top_tick, max_value)
-        ax.set_ylim(0, top + headroom)
-        ax.set_yticks(ticks)
-        ax.set_yticklabels([format_tick(t, top_tick) for t in ticks], color=AXIS_TEXT_COLOR, fontsize=AXIS_FONT_SIZE)
-        ax.set_xticks(x)
-        ax.set_xticklabels([period_label(p) for p in periods], color=AXIS_TEXT_COLOR, fontsize=AXIS_FONT_SIZE)
+        for ax, group, kind in panels:
+            _draw_panel(ax, history, group, colors, settings, kind, x, periods, x_limits, px_per_pt,
+                        names_at_end, name_gap_pt if names_at_end else None, box_pad if names_at_end else None)
 
-        # --- Clean look: only light horizontal grid lines -------------------
-        ax.tick_params(axis="both", length=0, pad=14)
-        ax.grid(axis="y", color=GRID_COLOR, linewidth=1.2)
-        ax.grid(axis="x", visible=False)
-        ax.set_axisbelow(True)
-        for spine in ax.spines.values():
-            spine.set_visible(False)
-
-        # --- Lines -----------------------------------------------------------
-        # Our own site is drawn last (on top of the others) with a thicker line.
-        draw_order = [n for n in names if n != settings.highlight] + [n for n in names if n == settings.highlight]
-        for name in draw_order:
-            is_ours = name == settings.highlight
-            ax.plot(x, history[name].to_numpy(), color=colors[name],
-                    linewidth=HIGHLIGHT_LINE_WIDTH if is_ours else LINE_WIDTH,
-                    marker="o", markersize=MARKER_SIZE * 1.4 if is_ours else MARKER_SIZE,
-                    markeredgewidth=0, solid_capstyle="round", zorder=4 if is_ours else 3)
-            # Missing months are NaN -> matplotlib leaves a gap in the line.
-
-        # From here on we work in pixels, so we can measure distances exactly.
-        def to_px(xv, yv):
-            return ax.transData.transform((xv, yv))
-
-        y_floor = to_px(0, 0)[1]
-        y_ceiling = to_px(0, ax.get_ylim()[1])[1]
-
-        value_boxes = []  # where the numbers ended up, so name boxes can avoid them
-        if settings.show_values:
-            value_boxes = _add_value_labels(ax, history, names, colors, x, to_px, y_floor, y_ceiling, px_per_pt)
-        if names_at_end:
-            _add_name_labels(ax, history, names, colors, to_px, y_floor, y_ceiling,
-                             px_per_pt, name_gap_pt, settings.name_style, box_pad)
-        else:
-            _add_callouts(ax, history, names, colors, to_px, value_boxes, px_per_pt)
+        if groups:
+            _draw_break(fig, panels[0][0], panels[1][0])
 
         buffer = io.BytesIO()
         fig.savefig(buffer, format=settings.file_format, dpi=dpi, facecolor="white",
@@ -351,6 +365,86 @@ def render_chart(history, settings=None):
         return buffer.getvalue()
     finally:
         plt.close(fig)  # always free memory, even if something failed
+
+
+def _draw_panel(ax, history, names, colors, settings, kind, x, periods, x_limits, px_per_pt,
+                names_at_end, name_gap_pt, box_pad):
+    """Draw one part of the chart: axis, grid, lines, numbers and names for `names`."""
+    values = history[names]
+    max_value = float(values.max().max())
+
+    # --- Y axis ---------------------------------------------------------------
+    if kind == "top":
+        # The big sites: the axis starts near their lowest value, not at 0.
+        ticks, bottom, top_tick = range_axis(float(values.min().min()), max_value)
+        pad = (top_tick - bottom) * 0.08  # room for numbers above / below the points
+        ax.set_ylim(bottom - pad, top_tick + pad)
+    else:
+        if kind == "bottom":  # a shorter part, so fewer grid lines
+            step = nice_step(max_value, max_ticks=6)
+            top_tick = math.ceil(max_value / step) * step
+            ticks = np.arange(0, top_tick + step / 2, step)
+        else:
+            ticks, top_tick = y_axis(max_value, settings)
+        headroom = top_tick * 0.06  # room above the highest point for its label
+        top = top_tick if settings.y_max else max(top_tick, max_value)
+        ax.set_ylim(0, top + headroom)
+    ax.set_yticks(ticks)
+    ax.set_yticklabels([format_tick(t, top_tick) for t in ticks], color=AXIS_TEXT_COLOR, fontsize=AXIS_FONT_SIZE)
+
+    ax.set_xlim(*x_limits)
+    ax.set_xticks(x)
+    if kind == "top":
+        ax.tick_params(axis="x", labelbottom=False)  # month names only under the bottom part
+    else:
+        ax.set_xticklabels([period_label(p) for p in periods], color=AXIS_TEXT_COLOR, fontsize=AXIS_FONT_SIZE)
+
+    # --- Clean look: only light horizontal grid lines -------------------------
+    ax.tick_params(axis="both", length=0, pad=14)
+    ax.grid(axis="y", color=GRID_COLOR, linewidth=1.2)
+    ax.grid(axis="x", visible=False)
+    ax.set_axisbelow(True)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+    # --- Lines -------------------------------------------------------------------
+    # Our own site is drawn last (on top of the others) with a thicker line.
+    draw_order = [n for n in names if n != settings.highlight] + [n for n in names if n == settings.highlight]
+    for name in draw_order:
+        is_ours = name == settings.highlight
+        ax.plot(x, history[name].to_numpy(), color=colors[name],
+                linewidth=HIGHLIGHT_LINE_WIDTH if is_ours else LINE_WIDTH,
+                marker="o", markersize=MARKER_SIZE * 1.4 if is_ours else MARKER_SIZE,
+                markeredgewidth=0, solid_capstyle="round", zorder=4 if is_ours else 3)
+        # Missing months are NaN -> matplotlib leaves a gap in the line.
+
+    # From here on we work in pixels, so we can measure distances exactly.
+    def to_px(xv, yv):
+        return ax.transData.transform((xv, yv))
+
+    y_floor = to_px(0, ax.get_ylim()[0])[1]
+    y_ceiling = to_px(0, ax.get_ylim()[1])[1]
+
+    value_boxes = []  # where the numbers ended up, so name boxes can avoid them
+    if settings.show_values:
+        value_boxes = _add_value_labels(ax, history, names, colors, x, to_px, y_floor, y_ceiling, px_per_pt)
+    if names_at_end:
+        _add_name_labels(ax, history, names, colors, to_px, y_floor, y_ceiling,
+                         px_per_pt, name_gap_pt, settings.name_style, box_pad)
+    else:
+        _add_callouts(ax, history, names, colors, to_px, value_boxes, px_per_pt)
+
+
+def _draw_break(fig, ax_top, ax_bottom):
+    """Show that the scale jumps between the two parts: a dashed line and '//' marks."""
+    top_box, bottom_box = ax_top.get_position(), ax_bottom.get_position()
+    y = (top_box.y0 + bottom_box.y1) / 2
+    fig.add_artist(Line2D([top_box.x0, top_box.x1], [y, y], transform=fig.transFigure,
+                          color="#C8C8C8", linewidth=1.2, linestyle=(0, (6, 6))))
+    for dx in (0.0, 0.005):
+        x0 = top_box.x0 - 0.016 + dx
+        fig.add_artist(Line2D([x0, x0 + 0.006], [y - 0.012, y + 0.012], transform=fig.transFigure,
+                              color=AXIS_TEXT_COLOR, linewidth=1.6))
 
 
 def _add_value_labels(ax, history, names, colors, x, to_px, y_floor, y_ceiling, px_per_pt):
