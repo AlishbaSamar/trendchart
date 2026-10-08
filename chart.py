@@ -110,6 +110,7 @@ class ChartSettings:
     # Manual values are used exactly - points above y_max are cut off (the app warns first).
     y_max: float | None = None
     y_step: float | None = None
+    y_min: float | None = None  # where the axis starts (None = 0). A higher start spreads close lines apart.
 
     # image size (PRD default: 2727 x 1087 pixels)
     width_px: int = 2727
@@ -316,7 +317,7 @@ def render_chart(history, settings=None):
 
     dpi = settings.dpi
     px_per_pt = dpi / 72  # converts font sizes (points) to pixels
-    manual_axis = bool(settings.y_max or settings.y_step)
+    manual_axis = bool(settings.y_max or settings.y_step or settings.y_min)
 
     # One part, or two parts when a few sites dwarf the rest (never with a manual y-axis).
     groups = None
@@ -386,9 +387,11 @@ def _draw_panel(ax, history, names, colors, settings, kind, x, periods, x_limits
             ticks = np.arange(0, top_tick + step / 2, step)
         else:
             ticks, top_tick = y_axis(max_value, settings)
-        headroom = top_tick * 0.06  # room above the highest point for its label
+        bottom = settings.y_min if (kind == "single" and settings.y_min) else 0
+        ticks = ticks[ticks >= bottom]
+        headroom = (top_tick - bottom) * 0.06  # room above the highest point for its label
         top = top_tick if settings.y_max else max(top_tick, max_value)
-        ax.set_ylim(0, top + headroom)
+        ax.set_ylim(bottom, top + headroom)
     ax.set_yticks(ticks)
     ax.set_yticklabels([format_tick(t, top_tick) for t in ticks], color=AXIS_TEXT_COLOR, fontsize=AXIS_FONT_SIZE)
 

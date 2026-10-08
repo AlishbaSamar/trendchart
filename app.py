@@ -462,20 +462,41 @@ with tab_settings:
         st.caption(f"Automatic: 0 to {auto_top:,.0f} in steps of {auto_step:,.0f}.")
         manual = st.toggle("Set it myself", value=metric in state.axis, key=f"manual_{metric}")
         if manual and shown_here:
-            saved_top, saved_step = state.axis.get(metric, (auto_top, auto_step))
+            min_value = float(history[shown_here].min().min())
+            saved_top, saved_step, saved_start = state.axis.get(metric, (auto_top, auto_step, 0.0))
+            state.setdefault(f"ymin_{metric}", float(saved_start))
             state.setdefault(f"ymax_{metric}", float(saved_top))
             state.setdefault(f"ystep_{metric}", float(saved_step))
-            a1, a2 = st.columns(2)
+            a0, a1, a2 = st.columns(3)
+            y_min = a0.number_input("Start at", min_value=0.0, step=float(auto_step), format="%g",
+                                    key=f"ymin_{metric}",
+                                    help="Start above 0 to spread lines apart when all values are close "
+                                         "together (e.g. 20 for values between 25 and 37).")
             y_max = a1.number_input("Top", min_value=1.0, step=float(auto_step), format="%g", key=f"ymax_{metric}")
             y_step = a2.number_input("Step (e.g. 2000 = 2K)", min_value=0.1, step=float(auto_step),
                                      format="%g", key=f"ystep_{metric}")
-            state.axis[metric] = (y_max, y_step)
+            state.axis[metric] = (y_max, y_step, y_min)
+
+            def start_near_lowest():
+                step = 5.0 if max_value <= 100 else float(auto_step)
+                state[f"ymin_{metric}"] = max(0.0, (min_value - step / 5) // step * step)
+                state[f"ystep_{metric}"] = step
+                state[f"ymax_{metric}"] = float(-(-(max_value + step / 5) // step) * step)
+
+            st.button("Start just below the lowest value (spreads the lines)", on_click=start_near_lowest)
+
             if max_value > y_max:
                 def expand():
                     state[f"ymax_{metric}"] = float(-(-max_value // y_step) * y_step)
 
                 st.warning(f"The highest value ({max_value:,.0f}) is above {y_max:,.0f}, so it would be cut off.")
                 st.button("Make it fit", on_click=expand)
+            if y_min > min_value:
+                st.warning(f"The lowest value ({min_value:,.0f}) is below the start ({y_min:,.0f}), "
+                           "so it would be cut off.")
+            if y_min >= y_max:
+                st.error("'Start at' must be lower than 'Top'.")
+                st.stop()
         else:
             state.axis.pop(metric, None)
 
@@ -484,9 +505,9 @@ site = None if our_site == "(none)" else our_site
 
 def settings_for(chart_name, file_format="png"):
     """The same look for every chart; only the y-axis is per chart."""
-    y_max, y_step = state.axis.get(chart_name, (None, None))
+    y_max, y_step, y_min = state.axis.get(chart_name, (None, None, None))
     return ChartSettings(hidden=[n for n in names if n not in visible], colors=colors, show_values=show_values,
-                         name_style=name_style, highlight=site, y_max=y_max, y_step=y_step,
+                         name_style=name_style, highlight=site, y_max=y_max, y_step=y_step, y_min=y_min or None,
                          split="auto" if split else "off", file_format=file_format)
 
 
